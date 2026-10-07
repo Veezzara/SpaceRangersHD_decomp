@@ -78,6 +78,16 @@ implementation
 uses
   SysUtils;
 
+// Native libraries of the port (see tools/buildnative.sh) and portlibs.
+{$LINKLIB SDL2}
+{$LINKLIB citro3d}
+{$LINKLIB okgf}
+{$LINKLIB vorbisfile}
+{$LINKLIB ogg}
+{$LINKLIB png16}
+{$LINKLIB jpeg}
+{$LINKLIB z}
+
 var
   RomfsOk: Boolean;
   LogLock: TRTLCriticalSection;

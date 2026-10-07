@@ -28,6 +28,51 @@ The port adds an `arm-ctr` target to Free Pascal:
   the stack after the VFP argument registers were used up; the patch fixes it
   and aligns such arguments as required by AAPCS.
 
+## Platform layer
+
+The FPC port draws through an IDirect3DDevice9 implemented on SDL_Renderer.
+`native/sdlctr` implements the part of SDL2 it uses on the 3DS, so the
+port's Pascal platform units stay unchanged:
+
+- Rendering: citro3d, with texture render targets, batched triangles,
+  clipping, alpha blending and readback. Render targets must be in VRAM
+  (two 3 MiB banks), so the 1024x768 game screen uses RGB565.
+- Presentation: one screen shows the whole game screen scaled down with a
+  frame marking the zoomed region, the other a zoomed region that follows
+  the cursor.
+- Input, audio (ndsp; needs `sdmc:/3ds/dspfirm.cdc`), software keyboard,
+  message boxes, mutexes and condition variables.
+
+`native/vorbisfile` provides the libvorbisfile calls of the game on Tremor.
+OKGF, the game's C graphics library, is built from its pinned source.
+
+### Controls
+
+| Input | Action |
+| --- | --- |
+| Touch screen | Left click / drag at the touched point |
+| L + touch | Move the cursor without clicking |
+| R + touch | Right click |
+| Circle pad | Move the cursor |
+| A / B | Left / right mouse button |
+| L + circle pad | Mouse wheel |
+| C-stick | Pan the zoomed view (New 3DS) |
+| ZL / ZR | Zoom out / in (New 3DS) |
+| D-pad | Arrow keys |
+| X | Software keyboard |
+| Y | Enter |
+| START | Escape |
+| SELECT | Swap the screens |
+
+## Installing
+
+Copy `Rangers.3dsx` to `sdmc:/3ds/` and the contents of the installed game
+folder to `sdmc:/3ds/SpaceRangersHD/` (so that `install.txt` is directly in
+it). Saves and logs go to `sdmc:/3ds/SpaceRangersHD/user/`; the port's own
+logs are `ctr.log` and `sdl.log` in the data folder. Without data the game
+shows where it expects it. Planetary battles (MatrixGame) and AVI videos are
+not available.
+
 ## Building
 
 Requirements: devkitARM with libctru and the 3DS portlibs (the
@@ -36,10 +81,11 @@ host, git, make.
 
 ```sh
 export DEVKITPRO=/opt/devkitpro
-FPC_BOOTSTRAP=/path/to/ppcx64 GAME_FLAGS=-Cn port3ds/tools/build.sh
+FPC_BOOTSTRAP=/path/to/ppcx64 port3ds/tools/build.sh
 ```
 
-Outputs go to `port3ds/.local/`:
+Steps: `compiler rtl native game rtltest` (default: all). Outputs go to
+`port3ds/.local/`:
 
 - `rtltest/rtltest.3dsx` - RTL self-test; writes `sdmc:/rtltest.log` and ends
   with `RESULT: PASS`. It covers exceptions, strings and code pages, floating
@@ -48,8 +94,8 @@ Outputs go to `port3ds/.local/`:
 
 `tools/run-azahar.sh` runs a `.3dsx` in the [Azahar](https://github.com/azahar-emu/azahar)
 emulator on a virtual display. The RTL self-test passes there.
-- `build/` - the game. `GAME_FLAGS=-Cn` compiles all game units without
-  linking; linking needs the 3DS platform layer (in progress).
+- `build/Rangers.3dsx` - the game. `GAME_FLAGS=-Cn` compiles the game units
+  without linking.
 
 ## Status
 
@@ -58,7 +104,11 @@ emulator on a virtual display. The RTL self-test passes there.
       CP1251, CP1252, CP866, Latin/Cyrillic case mapping)
 - [x] RTL self-test passes in the emulator
 - [x] All game units compile for the 3DS
-- [ ] Platform layer: rendering (citro3d), input, audio, events
-- [ ] Linked `.3dsx`, game start-up with data from the SD card
+- [x] Platform layer: SDL2 subset on citro3d, ndsp and hid; the video
+      self-test passes in the emulator
+- [x] Linked `Rangers.3dsx`; in the emulator it starts and stops at the
+      first data file
+- [ ] Run with game data; measure speed and memory on a New 3DS
+- [ ] Interface legibility on the small screens (layout work)
 
 Game data is not included; it comes from an installed copy of the game.

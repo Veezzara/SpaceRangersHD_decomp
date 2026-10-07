@@ -1,3 +1,45 @@
+diff --git a/platform/GameSystem.pas b/platform/GameSystem.pas
+index 93501b6..057c580 100644
+--- a/platform/GameSystem.pas
++++ b/platform/GameSystem.pas
+@@ -203,7 +203,7 @@ begin
+   Result := Cardinal(GetTickCount64);
+ end;
+ 
+-{$IFDEF UNIX}
++{$IF DEFINED(UNIX) OR DEFINED(CTR)}
+ function ResolveGamePathCase(const Path: UnicodeString): UnicodeString;
+ var
+   Directory, Name: UnicodeString;
+@@ -232,7 +232,7 @@ begin
+       FindClose(Entry);
+     end;
+ end;
+-{$ENDIF}
++{$IFEND}
+ 
+ function NativeGamePath(const Path: UnicodeString): UnicodeString;
+ var
+@@ -243,13 +243,17 @@ begin
+   for Index := 1 to Length(Result) do
+     if (Result[Index] = '\') or (Result[Index] = '/') then
+       Result[Index] := DirectorySeparator;
+-{$IFDEF UNIX}
++{$IF DEFINED(UNIX) OR DEFINED(CTR)}
+   Result := ResolveGamePathCase(Result);
+-{$ENDIF}
++{$IFEND}
+ end;
+ 
+ function GameUserDirectory: UnicodeString;
+ begin
++{$IFDEF CTR}
++  Result := 'sdmc:/3ds/SpaceRangersHD/user/';
++  Exit;
++{$ENDIF}
+ {$IFDEF DARWIN}
+   Result := GetUserDir + 'Library/Application Support/SpaceRangersHD/';
+ {$ELSE}
 diff --git a/source/Rangers.dpr b/source/Rangers.dpr
 index 1948f70..5ec0990 100644
 --- a/source/Rangers.dpr

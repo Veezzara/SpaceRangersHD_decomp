@@ -36,11 +36,16 @@ rm -f "$OUT/libokgf.a"
 arm-none-eabi-ar rcs "$OUT/libokgf.a" "$OUT"/obj/okgf/*.o
 
 # vorbisfile on Tremor: rename Tremor's ov_* so the shim can provide them
-if [ -d "$HERE/native/vorbisfile" ]; then
-  cp "$DEVKITPRO/portlibs/3ds/lib/libvorbisidec.a" "$OUT/obj/vorbis/libtremor.a"
-  arm-none-eabi-objcopy --prefix-symbols=tremor_ "$OUT/obj/vorbis/libtremor.a" "$OUT/obj/vorbis/libtremor_p.a" 2>/dev/null || true
-  for f in "$HERE"/native/vorbisfile/*.c; do
-    arm-none-eabi-gcc "${CFLAGS[@]}" -c "$f" -o "$OUT/obj/vorbis/$(basename "${f%.c}").o"
-  done
-fi
+SYMS=()
+for sym in $(arm-none-eabi-nm "$DEVKITPRO/portlibs/3ds/lib/libvorbisidec.a" | awk '$2=="T" && $3 ~ /^ov_/ {print $3}' | sort -u); do
+  SYMS+=(--redefine-sym "$sym=tremor_$sym")
+done
+arm-none-eabi-objcopy "${SYMS[@]}" "$DEVKITPRO/portlibs/3ds/lib/libvorbisidec.a" "$OUT/obj/vorbis/libtremor.a"
+arm-none-eabi-gcc "${CFLAGS[@]}" -c "$HERE/native/vorbisfile/vorbisfile_tremor.c" -o "$OUT/obj/vorbis/vorbisfile_tremor.o"
+rm -f "$OUT/libvorbisfile.a"
+cp "$OUT/obj/vorbis/libtremor.a" "$OUT/libvorbisfile.a"
+arm-none-eabi-ar rs "$OUT/libvorbisfile.a" "$OUT/obj/vorbis/vorbisfile_tremor.o"
+# the Pascal bindings also name these libraries; Tremor contains everything
+arm-none-eabi-ar rcs "$OUT/libvorbis.a"
+arm-none-eabi-ar rcs "$OUT/libvorbisenc.a"
 echo "native libraries in $OUT"

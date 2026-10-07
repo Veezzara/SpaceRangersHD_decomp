@@ -3,7 +3,7 @@
 #
 #   port3ds/tools/build.sh [step...]
 #
-# Steps (default: all): compiler rtl game rtltest
+# Steps (default: all): compiler rtl native game rtltest
 #
 # Requirements:
 #   - devkitARM + libctru + 3ds portlibs (DEVKITPRO, default /opt/devkitpro;
@@ -33,6 +33,7 @@ RTL_OUT=$WORK/rtl
 GAME_SRC=$WORK/game
 OKGF_SRC=$WORK/okgf
 GAME_OUT=$WORK/build
+NATIVE_OUT=$WORK/native
 
 log() { printf '\033[1m==> %s\033[0m\n' "$*"; }
 
@@ -73,14 +74,21 @@ step_rtl() {
     { grep -E "Error|Fatal" "$WORK/rtl.log" | head -30; exit 1; }
 }
 
+step_native() {
+  log "Building native libraries (SDL2 subset, OKGF, vorbisfile)"
+  checkout "$OKGF_REPO" "$OKGF_REV" "$OKGF_SRC"
+  "$HERE/tools/buildnative.sh" "$OKGF_SRC" "$NATIVE_OUT" > "$WORK/native.log" 2>&1 ||
+    { grep -iE "error" "$WORK/native.log" | head -30; exit 1; }
+}
+
 step_game() {
   log "Preparing game sources ($GAME_REV)"
   checkout "$GAME_REPO" "$GAME_REV" "$GAME_SRC"
   git -C "$GAME_SRC" apply "$HERE/patches/SpaceRangersHD_FPC.patch"
   log "Compiling the game for arm-ctr"
-  "$HERE/tools/buildgame.sh" "$FPC_SRC" "$RTL_OUT" "$GAME_SRC" "$GAME_OUT" ${GAME_FLAGS:-} > "$WORK/game.log" 2>&1 ||
+  "$HERE/tools/buildgame.sh" "$FPC_SRC" "$RTL_OUT" "$GAME_SRC" "$GAME_OUT" "-Fl$NATIVE_OUT" ${GAME_FLAGS:-} > "$WORK/game.log" 2>&1 ||
     { grep -E "Error|Fatal|undefined reference" "$WORK/game.log" | head -40; exit 1; }
-  if [ -f "$GAME_OUT/Rangers.elf" ]; then
+  if [[ " ${GAME_FLAGS:-} " != *" -Cn "* ]] && [ -f "$GAME_OUT/Rangers.elf" ]; then
     smdhtool --create "Space Rangers HD" "Unofficial 3DS port" "SpaceRangersHD_decomp" \
       "$HERE/meta/icon.png" "$GAME_OUT/Rangers.smdh"
     3dsxtool "$GAME_OUT/Rangers.elf" "$GAME_OUT/Rangers.3dsx" --smdh="$GAME_OUT/Rangers.smdh"
@@ -102,5 +110,5 @@ step_rtltest() {
 }
 
 steps=("$@")
-[ ${#steps[@]} -eq 0 ] && steps=(compiler rtl game rtltest)
+[ ${#steps[@]} -eq 0 ] && steps=(compiler rtl native game rtltest)
 for s in "${steps[@]}"; do "step_$s"; done
