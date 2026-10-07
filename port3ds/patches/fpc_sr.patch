@@ -1,0 +1,188 @@
+diff --git a/compiler/aggas.pas b/compiler/aggas.pas
+index 423a5c61..f613ba3a 100644
+--- a/compiler/aggas.pas
++++ b/compiler/aggas.pas
+@@ -1040,7 +1040,7 @@ implementation
+                            else
+                              writer.AsmWriteln(Tai_datablock(hp).sym.name);
+                          end;
+-                       if ((target_info.system <> system_arm_linux) and (target_info.system <> system_arm_android)) then
++                       if ((target_info.system <> system_arm_linux) and (target_info.system <> system_arm_android) and (target_info.system <> system_arm_ctr)) then
+                          sepChar := '@'
+                        else
+                          sepChar := '%';
+@@ -1436,7 +1436,7 @@ implementation
+                  end
+                else
+                  begin
+-                   if ((target_info.system <> system_arm_linux) and (target_info.system <> system_arm_android)) or
++                   if ((target_info.system <> system_arm_linux) and (target_info.system <> system_arm_android) and (target_info.system <> system_arm_ctr)) or
+                      (target_asm.id=as_arm_vasm) then
+                      sepChar := '@'
+                    else
+@@ -1471,7 +1471,7 @@ implementation
+                  { the .localentry directive has to specify the size from the
+                    start till here of the non-local entry code as second argument }
+                  s:=', .-';
+-               if ((target_info.system <> system_arm_linux) and (target_info.system <> system_arm_android)) then
++               if ((target_info.system <> system_arm_linux) and (target_info.system <> system_arm_android) and (target_info.system <> system_arm_ctr)) then
+                  sepChar := '@'
+                else
+                  sepChar := '#';
+diff --git a/compiler/arm/agarmgas.pas b/compiler/arm/agarmgas.pas
+index a1523715..0e2f6f72 100644
+--- a/compiler/arm/agarmgas.pas
++++ b/compiler/arm/agarmgas.pas
+@@ -469,7 +469,7 @@       TArmAppleGNUAssembler=class(TAppleGNUassembler)
+             asmbin : 'as';
+             asmcmd : '-o $OBJ $EXTRAOPT $ASM';
+             supported_targets : [system_arm_linux,system_arm_netbsd,system_arm_wince,system_arm_gba,system_arm_palmos,system_arm_nds,
+-                                 system_arm_embedded,system_arm_symbian,system_arm_android,system_arm_aros,system_arm_freertos];
++                                 system_arm_embedded,system_arm_symbian,system_arm_android,system_arm_aros,system_arm_freertos,system_arm_ctr];
+             flags : [af_needar,af_smartlink_sections];
+             labelprefix : '.L';
+             labelmaxlen : -1;
+diff --git a/compiler/arm/cpuelf.pas b/compiler/arm/cpuelf.pas
+index b867a6e5..c338d8dd 100644
+--- a/compiler/arm/cpuelf.pas
++++ b/compiler/arm/cpuelf.pas
+@@ -974,7 +974,7 @@     TArmRelocProp=record
+          supported_targets : [system_arm_embedded,system_arm_ios,
+                               system_arm_linux,system_arm_netbsd,
+                               system_arm_gba,system_arm_nds,
+-                              system_arm_aros,system_arm_freertos];
++                              system_arm_aros,system_arm_freertos,system_arm_ctr];
+          flags : [af_outputbinary,af_smartlink_sections,af_supports_dwarf];
+          labelprefix : '.L';
+          labelmaxlen : -1;
+diff --git a/compiler/arm/cpupara.pas b/compiler/arm/cpupara.pas
+index bf17f6fe..1b6ee807 100644
+--- a/compiler/arm/cpupara.pas
++++ b/compiler/arm/cpupara.pas
+@@ -616,7 +616,26 @@        tcpuparamanager = class(tarmgenparamanager)
+                           sparesinglereg := NR_NO;
+                           { LOC_REFERENCE always contains everything that's left }
+                           paraloc^.loc:=LOC_REFERENCE;
+-                          paraloc^.size:=int_cgsize(paralen);
++                          { a plain floating point value keeps its float size:
++                            the code generator loads it with VFP instructions
++                            and cannot store an integer-sized mm register }
++                          if (paradef.typ=floatdef) and
++                             (paracgsize in [OS_F32,OS_F64]) then
++                            begin
++                              paraloc^.size:=paracgsize;
++                              paraloc^.def:=paradef;
++                            end
++                          else
++                            paraloc^.size:=int_cgsize(paralen);
++                          { AAPCS: 8 byte aligned arguments start at an 8 byte
++                            aligned stack offset }
++                          if (target_info.abi in [abi_eabi,abi_eabihf]) and
++                             firstparaloc and
++                             (paradef.alignment=8) then
++                            begin
++                              stack_offset:=align(stack_offset,8);
++                              hp.paraloc[side].Alignment:=8;
++                            end;
+                           if (side=callerside) then
+                             paraloc^.reference.index:=NR_STACK_POINTER_REG;
+                           paraloc^.reference.offset:=stack_offset;
+diff --git a/compiler/arm/cputarg.pas b/compiler/arm/cputarg.pas
+index de7aa01c..5c4ecbe6 100644
+--- a/compiler/arm/cputarg.pas
++++ b/compiler/arm/cputarg.pas
+@@ -53,6 +53,9 @@ implementation
+     {$ifndef NOTARGETNDS}
+       ,t_nds
+     {$endif}
++    {$ifndef NOTARGETCTR}
++      ,t_ctr
++    {$endif}
+     {$ifndef NOTARGETEMBEDDED}
+       ,t_embed
+     {$endif}
+diff --git a/compiler/options.pas b/compiler/options.pas
+index 283ec883..3757f725 100644
+--- a/compiler/options.pas
++++ b/compiler/options.pas
+@@ -2183,6 +2183,8 @@ procedure TOption.TargetOptions(def:boolean);
+       target_unsup_features:=[f_dynlibs];
+     system_arm_nds:
+       target_unsup_features:=[f_threading,f_commandargs,f_fileio,f_textio,f_consoleio,f_dynlibs];
++    system_arm_ctr:
++      target_unsup_features:=[f_dynlibs,f_processes];
+     system_i386_nativent:
+       // until these features are implemented, they are disabled in the compiler
+       target_unsup_features:=[f_stackcheck];
+@@ -2219,7 +2221,7 @@ procedure TOption.TargetOptions(def:boolean);
+ 
+   { monitor support? }
+   if not(target_info.system in systems_aix+systems_bsd+systems_linux+systems_android+
+-    systems_nativent+systems_solaris+systems_wasm+systems_all_windows-[system_i8086_win16]+systems_darwin) then
++    systems_nativent+systems_solaris+systems_wasm+systems_all_windows-[system_i8086_win16]+systems_darwin+[system_arm_ctr]) then
+     Include(target_unsup_features,f_monitor);
+ 
+   if def then
+@@ -5471,10 +5473,21 @@ procedure read_arguments(cmd:TCmdStr);
+         if not option.OptCPUSetExplicitly then
+           init_settings.optimizecputype:=cpu_armv6;
+ {$else CPUARMV6}
+-        if not option.CPUSetExplicitly then
+-          init_settings.cputype:=cpu_armv7a;
+-        if not option.OptCPUSetExplicitly then
+-          init_settings.optimizecputype:=cpu_armv7a;
++        if target_info.system=system_arm_ctr then
++          begin
++            { Nintendo 3DS: ARM11 MPCore (ARMv6K) with VFPv2 }
++            if not option.CPUSetExplicitly then
++              init_settings.cputype:=cpu_armv6k;
++            if not option.OptCPUSetExplicitly then
++              init_settings.optimizecputype:=cpu_armv6k;
++          end
++        else
++          begin
++            if not option.CPUSetExplicitly then
++              init_settings.cputype:=cpu_armv7a;
++            if not option.OptCPUSetExplicitly then
++              init_settings.optimizecputype:=cpu_armv7a;
++          end;
+ {$endif CPUARMV6}
+ 
+         { Set FPU type }
+diff --git a/compiler/systems.inc b/compiler/systems.inc
+index 1e156fee..4aff40f4 100644
+--- a/compiler/systems.inc
++++ b/compiler/systems.inc
+@@ -218,7 +218,8 @@
+              system_mipsel_ps1,         { 123 }
+              system_wasm32_wasip1threads,{ 124 }
+              system_wasm32_wasip2,      { 125 }
+-             system_powerpc64_freebsd   { 126 }
++             system_powerpc64_freebsd,  { 126 }
++             system_arm_ctr             { 127 }
+        );
+ 
+      type
+@@ -345,7 +346,8 @@
+              ld_sinclairql,
+              ld_wasi,
+              ld_human68k,
+-             ld_ps1
++             ld_ps1,
++             ld_ctr
+        );
+ 
+        tar = (ar_none
+diff --git a/rtl/objpas/classes/classesh.inc b/rtl/objpas/classes/classesh.inc
+index 5ef3a6ec..1b159151 100644
+--- a/rtl/objpas/classes/classesh.inc
++++ b/rtl/objpas/classes/classesh.inc
+@@ -2320,7 +2320,7 @@     TSystemTimes = record
+   private
+     FInitialSuspended: boolean;
+ {$endif}
+-{$if defined(Unix) or defined(wasi)}
++{$if defined(Unix) or defined(wasi) or defined(ctr)}
+   private
+     // see tthread.inc, ThreadFunc and TThread.Resume
+     FSuspendEvent: PRTLEvent;
