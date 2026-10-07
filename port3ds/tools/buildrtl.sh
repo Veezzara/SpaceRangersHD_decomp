@@ -27,8 +27,8 @@ for unit in "$RTL/objpas/objpas.pp" "$RTL/objpas/sysconst.pp" "$RTL/objpas/rtlco
             "$RTL/inc/sortbase.pp" "$RTL/arm/intrinsics.pp" "$RTL/ctr/classes.pp" \
             "$RTL/objpas/math.pp" "$RTL/objpas/fgl.pp" "$RTL/inc/ctypes.pp" \
             "$RTL/inc/strings.pp" "$RTL/inc/charset.pp" "$RTL/objpas/unicodedata.pas" \
-            "$RTL/objpas/fpwidestring.pp" "$RTL/charmaps/cp1251.pas" "$RTL/charmaps/cp1252.pas" \
-            "$RTL/charmaps/cp866.pas" "$RTL/objpas/character.pas" "$RTL/inc/getopts.pp" \
+            "$RTL/ctr/ctrwstring.pp" \
+            "$RTL/objpas/character.pas" "$RTL/inc/getopts.pp" \
             "$RTL/inc/lineinfo.pp" "$RTL/inc/lnfodwrf.pp" "$RTL/inc/heaptrc.pp"; do
   "$PPC" "${COMMON[@]}" "$unit"
 done

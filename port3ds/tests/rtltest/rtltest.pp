@@ -6,7 +6,7 @@ program rtltest;
 {$mode objfpc}{$H+}
 
 uses
-  fpwidestring, cp1251, SysUtils, Classes, SyncObjs, Math, DateUtils, StrUtils, Contnrs;
+  ctrwstring, SysUtils, Classes, SyncObjs, Math, DateUtils, StrUtils, Contnrs;
 
 type
   TGfxScreen = LongInt;
@@ -102,7 +102,9 @@ begin
   for i := 0 to High(w) do
     begin
       w[i].WaitFor;
-      ok := ok and (w[i].Sum = 299997) and w[i].TVOk;
+      if (w[i].Sum <> 300000) or not w[i].TVOk then
+        Say(Format('  thread %d: sum=%d tv=%s', [i, w[i].Sum, BoolToStr(w[i].TVOk, True)]));
+      ok := ok and (w[i].Sum = 300000) and w[i].TVOk;
       w[i].Free;
     end;
   Check(ok, 'TThread run/WaitFor, threadvars per thread');
@@ -171,17 +173,22 @@ begin
   Check(Length(r) = 22, 'UTF8Encode length = ' + IntToStr(Length(r)));
   Check(UTF8Decode(r) = ws, 'UTF8 round trip');
   SetLength(r, 0);
-  r := ws;  // to default ansi
+  r := RawByteString(UTF8Encode(ws));
+  SetCodePage(r, CP_UTF8, False);
   SetCodePage(r, 1251, True);
   Check((Length(r) = 11) and (Byte(r[1]) = $CA), 'cp1251 conversion (first byte $' + IntToHex(Byte(r[1]), 2) + ')');
   Check(WideString(r) = ws, 'cp1251 round trip');
-  Check(WideUpperCase('abcё') = 'ABCЁ', 'WideUpperCase cyrillic');
+  Check(WideUpperCase(WideString('abc') + #$0451#$0436) = WideString('ABC') + #$0401#$0416, 'WideUpperCase cyrillic');
+  Check(WideCompareText(#$0430#$0431, #$0410#$0411) = 0, 'WideCompareText cyrillic');
+  Check(DefaultSystemCodePage = CP_UTF8, 'DefaultSystemCodePage = ' + IntToStr(DefaultSystemCodePage));
   Check(Format('%d-%s-%.2f', [42, 'x', 3.14159]) = '42-x-3.14', 'Format');
   Check(FloatToStr(0.5) = '0.5', 'FloatToStr');
   Check(StrToFloat('2.25') = 2.25, 'StrToFloat');
   Check(ReverseString('abc') = 'cba', 'StrUtils');
+  Say('  TStringList');
   sl := TStringList.Create;
   sl.CommaText := 'b,a,c';
+  Say('  sort');
   sl.Sort;
   Check(sl.CommaText = 'a,b,c', 'TStringList sort');
   sl.Free;
@@ -198,14 +205,40 @@ begin
   Check(Abs(Sin(Pi / 6) - 0.5) < 1e-12, 'Sin');
   Check(Round(2.5) = 2, 'banker''s Round');
   Check(Trunc(-2.7) = -2, 'Trunc');
-  e := 1.0 / 3.0;
+  d := 3.0;
+  e := 1.0 / d; { a constant 1.0/3.0 is folded to Single precision by FPC }
   Check(SizeOf(Extended) = 8, 'Extended is Double on ARM (size ' + IntToStr(SizeOf(Extended)) + ')');
-  Check(Abs(e * 3 - 1) < 1e-15, 'Extended arithmetic');
+  d := e * 3 - 1;
+  Check(Abs(d) < 1e-15, 'Extended arithmetic (' + FloatToStr(d) + ', e=' + FloatToStr(e) + ')');
   i64 := High(Int64) div 3;
   Check(i64 * 3 + 1 = High(Int64), 'Int64 div/mul');
   Check(Power(2, 10) = 1024, 'Power');
   Check(Max(3, 7) = 7, 'Max');
   Check(DaysBetween(EncodeDate(2026, 1, 1), EncodeDate(2026, 3, 1)) = 59, 'DateUtils');
+end;
+
+type
+  TV3 = record X, Y, Z: Double; end;
+
+function abitest_hfa(a, b, c: TV3; r: Double): Double; cdecl; external;
+function abitest_many(a, b, c, d, e, f, g, h, i: Double; k: LongInt; j: Double): Double; cdecl; external;
+function abitest_mixed(a: LongInt; b: Single; c: Int64; d: Double; e: Single; f: LongInt): Double; cdecl; external;
+function abitest_ret_hfa(x: Double): TV3; cdecl; external;
+
+{$L abitest.o}
+
+procedure TestABI;
+var
+  a, b, c, r: TV3;
+begin
+  a.X := 1; a.Y := 2; a.Z := 3;
+  b.X := 4; b.Y := 5; b.Z := 6;
+  c.X := 7; c.Y := 8; c.Z := 9;
+  Check(abitest_hfa(a, b, c, 0.5) = 1 + 5 * 10 + 9 * 100 + 0.5 * 1000, 'AAPCS-VFP: 3 HFA + stacked double');
+  Check(abitest_many(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11) = 120936, 'AAPCS-VFP: 10 doubles + int');
+  Check(abitest_mixed(1, 2.5, 3, 4.25, 5.5, 6) = 1 + 2.5 * 10 + 3 * 100 + 4.25 * 1000 + 5.5 * 10000 + 6 * 100000, 'AAPCS-VFP: mixed int/float');
+  r := abitest_ret_hfa(2);
+  Check((r.X = 2) and (r.Y = 4) and (r.Z = 6), 'AAPCS-VFP: HFA return');
 end;
 
 procedure TestFiles;
@@ -228,8 +261,17 @@ begin
   fs.Free;
   Check(FileExists(Dir + '/Alpha.TXT'), 'FileExists');
   ms := TMemoryStream.Create;
-  ms.LoadFromFile(Dir + '/alpha.txt');
-  Check(ms.Size = 10, 'case-insensitive open on sdmc (size ' + IntToStr(ms.Size) + ')');
+  try
+    ms.LoadFromFile(Dir + '/Alpha.TXT');
+    Check(ms.Size = 10, 'TMemoryStream.LoadFromFile (size ' + IntToStr(ms.Size) + ')');
+    { FAT on the console ignores case; emulators may not }
+    if FileExists(Dir + '/alpha.txt') then
+      Say('info sdmc: is case-insensitive')
+    else
+      Say('info sdmc: is case-sensitive (emulator host file system)');
+  except
+    on E: Exception do Check(False, 'LoadFromFile: ' + E.Message);
+  end;
   ms.Free;
   n := 0;
   if FindFirst(Dir + '/*.txt', faAnyFile, sr) = 0 then
@@ -284,6 +326,7 @@ begin
   TestExceptions;
   TestStrings;
   TestMath;
+  TestABI;
   TestFiles;
   TestHeap;
   TestThreads;

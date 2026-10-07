@@ -227,6 +227,10 @@ begin
   { Setup heap }
   InitHeap;
   SysInitExceptions;
+  { newlib, sdmc: and romfs: all use UTF-8 }
+  DefaultSystemCodePage:=CP_UTF8;
+  DefaultFileSystemCodePage:=CP_UTF8;
+  DefaultRTLFileSystemCodePage:=CP_UTF8;
   initunicodestringmanager;
   { Setup stdin, stdout and stderr }
   SysInitStdIO;

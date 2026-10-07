@@ -93,8 +93,9 @@ step_game() {
 step_rtltest() {
   log "Building the RTL self-test"
   mkdir -p "$WORK/rtltest"
+  arm-none-eabi-gcc -march=armv6k -mtune=mpcore -mfloat-abi=hard -O2 -c "$HERE/tests/rtltest/abitest.c" -o "$WORK/rtltest/abitest.o"
   "$FPC_SRC/compiler/ppcarm" -n -Tctr -XParm-none-eabi- -O2 -g "-Fu$RTL_OUT" "-Fl$DEVKITPRO/libctru/lib" \
-    "-FU$WORK/rtltest" "-FE$WORK/rtltest" "$HERE/tests/rtltest/rtltest.pp" > "$WORK/rtltest.log" 2>&1 ||
+    "-FU$WORK/rtltest" "-FE$WORK/rtltest" "-Fo$WORK/rtltest" "$HERE/tests/rtltest/rtltest.pp" > "$WORK/rtltest.log" 2>&1 ||
     { grep -E "Error|Fatal" "$WORK/rtltest.log"; exit 1; }
   3dsxtool "$WORK/rtltest/rtltest.elf" "$WORK/rtltest/rtltest.3dsx"
   log "Built $WORK/rtltest/rtltest.3dsx"

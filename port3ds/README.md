@@ -42,14 +42,21 @@ FPC_BOOTSTRAP=/path/to/ppcx64 GAME_FLAGS=-Cn port3ds/tools/build.sh
 Outputs go to `port3ds/.local/`:
 
 - `rtltest/rtltest.3dsx` - RTL self-test; writes `sdmc:/rtltest.log` and ends
-  with `RESULT: PASS`.
+  with `RESULT: PASS`. It covers exceptions, strings and code pages, floating
+  point, the Pascal/C calling convention (AAPCS-VFP), files, the heap, threads,
+  threadvars, critical sections and events.
+
+`tools/run-azahar.sh` runs a `.3dsx` in the [Azahar](https://github.com/azahar-emu/azahar)
+emulator on a virtual display. The RTL self-test passes there.
 - `build/` - the game. `GAME_FLAGS=-Cn` compiles all game units without
   linking; linking needs the 3DS platform layer (in progress).
 
 ## Status
 
 - [x] `arm-ctr` compiler target and RTL (system, sysutils, classes, threads,
-      math, widestrings with cp1251, zlib, fcl-image)
+      math, zlib, fcl-image) and a Unicode string manager (`ctrwstring`: UTF-8,
+      CP1251, CP1252, CP866, Latin/Cyrillic case mapping)
+- [x] RTL self-test passes in the emulator
 - [x] All game units compile for the 3DS
 - [ ] Platform layer: rendering (citro3d), input, audio, events
 - [ ] Linked `.3dsx`, game start-up with data from the SD card
