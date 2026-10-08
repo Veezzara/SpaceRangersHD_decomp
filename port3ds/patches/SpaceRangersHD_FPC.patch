@@ -492,8 +492,54 @@ index 1948f70..5ec0990 100644
  {$IFDEF MSWINDOWS}
    Windows,
  {$ENDIF}
+diff --git a/source/core/EC_Mem.pas b/source/core/EC_Mem.pas
+index 1ebd867..fb6c406 100644
+--- a/source/core/EC_Mem.pas
++++ b/source/core/EC_Mem.pas
+@@ -56,8 +56,23 @@ implementation
+ uses
+   GR_DX,
+   GR_Main,
++{$IFDEF CTR}
++  EC_Cache,
++{$ENDIF}
+   SysUtils;
+ 
++// Frees what can be rebuilt before an allocation is retried.
++procedure ReleaseMemoryForRetry;
++begin
++  EvictTextureCaches(True);
++{$IFDEF CTR}
++  // On the 3DS the resource cache is the largest discardable consumer;
++  // drop it to half its budget as well (entries in use are kept).
++  if GlobalCache <> nil then
++    GlobalCache.TrimToBudget(GlobalCache.ResidentByteLimit div 2);
++{$ENDIF}
++end;
++
+ function AllocEC(ByteCount: Integer): Pointer;
+ var
+   Memory: Pointer;
+@@ -66,7 +81,7 @@ begin
+   if Memory = nil then
+   begin
+     AppendLogTextThreadSafe('Failed to allocate memory, trying to free some textures... ');
+-    EvictTextureCaches(True);
++    ReleaseMemoryForRetry;
+     Memory := GameHeap.HeapAlloc(GameHeap.GetProcessHeap, 0, ByteCount);
+     if Memory <> nil then
+       AppendLogLineThreadSafe('success')
+@@ -88,7 +103,7 @@ begin
+   if Memory = nil then
+   begin
+     AppendLogTextThreadSafe('Failed to allocate memory, trying to free some textures... ');
+-    EvictTextureCaches(True);
++    ReleaseMemoryForRetry;
+     Memory := GameHeap.HeapAlloc(GameHeap.GetProcessHeap, GameHeap.HEAP_ZERO_MEMORY, ByteCount);
+     if Memory <> nil then
+       AppendLogLineThreadSafe('success')
 diff --git a/source/graphics/GR_gi.pas b/source/graphics/GR_gi.pas
-index 41e016b..baa057f 100644
+index 41e016b..b101dd9 100644
 --- a/source/graphics/GR_gi.pas
 +++ b/source/graphics/GR_gi.pas
 @@ -117,6 +117,9 @@ type
@@ -531,6 +577,37 @@ index 41e016b..baa057f 100644
  procedure TgiGR.LoadCompressedGiBytes(BufferPtr: Pointer; ByteCount: Integer);
  begin
    ClearData;
+@@ -236,17 +257,30 @@ end;
+ 
+ function TgiGR.GetBoundsRect: TRect;
+ begin
++{$IFDEF CTR}
++  // An image whose load failed for lack of memory has no header; draw nothing.
++  if Header = nil then
++    Exit(Rect(0, 0, 0, 0));
++{$ENDIF}
+   Result := Header.Bounds;
+ end;
+ 
+ function TgiGR.GetContentSize: TPoint;
+ begin
++{$IFDEF CTR}
++  if Header = nil then
++    Exit(Point(0, 0));
++{$ENDIF}
+   Result.X := Header.Bounds.Right - Header.Bounds.Left;
+   Result.Y := Header.Bounds.Bottom - Header.Bounds.Top;
+ end;
+ 
+ function TgiGR.GetTopLeft: TPoint;
+ begin
++{$IFDEF CTR}
++  if Header = nil then
++    Exit(Point(0, 0));
++{$ENDIF}
+   Result.X := Header.Bounds.Left;
+   Result.Y := Header.Bounds.Top;
+ end;
 diff --git a/source/resources/EC_CacheGAI.pas b/source/resources/EC_CacheGAI.pas
 index 1c8fc26..df83fb9 100644
 --- a/source/resources/EC_CacheGAI.pas
