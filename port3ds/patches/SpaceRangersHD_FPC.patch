@@ -1,8 +1,8 @@
 diff --git a/platform/GameGraphics.pas b/platform/GameGraphics.pas
-index 1aca9ba..7679fdf 100644
+index 1aca9ba..2d7ebf1 100644
 --- a/platform/GameGraphics.pas
 +++ b/platform/GameGraphics.pas
-@@ -6,6 +6,19 @@ interface
+@@ -6,6 +6,25 @@ interface
  uses
    Direct3D9;
  function CreateGameGraphics: IDirect3D9;
@@ -18,11 +18,17 @@ index 1aca9ba..7679fdf 100644
 +function CtrBeginScaledTextureFill(
 +  Texture: IDirect3DTexture9; out Shift: Integer; out Bits: Pointer; out Pitch: Integer): Boolean;
 +procedure CtrEndScaledTextureFill(Texture: IDirect3DTexture9);
++
++threadvar
++  // Smallest downscale of textures created by this thread: images the asset
++  // converter stored at 1 / (1 shl Shift) of their size set it around
++  // GR_CreateTexture, so that their textures are no larger than the image.
++  CtrTextureMinShift: Integer;
 +{$ENDIF}
  implementation
  uses
    GameGraphicsBase,
-@@ -15,7 +28,7 @@ uses
+@@ -15,7 +34,7 @@ uses
    SyncObjs,
    Math,
    SysUtils,
@@ -31,7 +37,7 @@ index 1aca9ba..7679fdf 100644
  type
    TSDLStorage = class;
    ISDLImage = interface
-@@ -30,6 +43,14 @@ type
+@@ -30,6 +49,14 @@ type
      TextureFormat: Cardinal;
      Generation: LongInt;
      Dirty, Locked, ReadOnly, Screen, Target: Boolean;
@@ -46,7 +52,7 @@ index 1aca9ba..7679fdf 100644
      constructor Create(
          W, H: Integer;
          Format, Pool: Cardinal;
-@@ -43,6 +64,11 @@ type
+@@ -43,6 +70,11 @@ type
      procedure Upload;
      procedure Lock(out Data: TD3DLockedRect; Rect: PRect; Flags: Cardinal);
      procedure Unlock;
@@ -58,13 +64,15 @@ index 1aca9ba..7679fdf 100644
    end;
    TSDLTexture = class(TSDLResourceBase, IDirect3DTexture9, ISDLImage)
      Image: ISDLImage;
-@@ -253,7 +279,21 @@ begin
+@@ -253,7 +285,23 @@ begin
    else
      Bpp := 4;
    Pitch := (W * Bpp + 3) and not 3;
 +{$IFDEF CTR}
 +  // Same downscale as sdlctr applies to textures above the GPU limit.
 +  Shift := 0;
++  if not IsTarget then
++    Shift := CtrTextureMinShift;
 +  if not IsTarget then
 +    while ((W shr Shift) > CtrMaxTextureSize) or ((H shr Shift) > CtrMaxTextureSize) do
 +      Inc(Shift);
@@ -80,7 +88,7 @@ index 1aca9ba..7679fdf 100644
    Screen := IsScreen;
    Target := IsTarget;
    Dirty := not Target;
-@@ -264,6 +304,14 @@ begin
+@@ -264,6 +312,14 @@ begin
    // the renderer thread, even though their Pascal pixel storage can be freed here.
    if Handle <> nil then
      RetiredTextures.Add(Handle);
@@ -95,7 +103,7 @@ index 1aca9ba..7679fdf 100644
    FreeMem(Pixels);
    inherited Destroy;
  end;
-@@ -271,6 +319,82 @@ function TSDLStorage.Storage: TSDLStorage;
+@@ -271,10 +327,98 @@ function TSDLStorage.Storage: TSDLStorage;
  begin
    Result := Self
  end;
@@ -106,6 +114,8 @@ index 1aca9ba..7679fdf 100644
 +  Pitch: Integer): Integer; cdecl; external;
 +function SDL_CTR_UpdateTextureStored(Texture: PSDL_Texture; Pixels: Pointer;
 +  Pitch: Integer): Integer; cdecl; external;
++function SDL_CTR_CreateTextureShifted(Renderer: PSDL_Renderer; Format: Cardinal; Access, W, H,
++  Shift: Integer): PSDL_Texture; cdecl; external;
 +
 +var
 +  PixelsLock: TRTLCriticalSection;
@@ -178,7 +188,21 @@ index 1aca9ba..7679fdf 100644
  procedure TSDLStorage.Realize;
  var
    Access: Integer;
-@@ -282,6 +406,10 @@ begin
+   CurrentGeneration: LongInt;
++{$IFDEF CTR}
++  function CreateHandle: PSDL_Texture;
++  begin
++    if Target then
++      Result := SDL_CreateTexture(GameSDLRenderer, TextureFormat, Access, Desc.Width, Desc.Height)
++    else
++      Result := SDL_CTR_CreateTextureShifted(
++          GameSDLRenderer, TextureFormat, Access, Desc.Width, Desc.Height, Shift);
++  end;
++{$ENDIF}
+ begin
+   if Target then
+     CurrentGeneration := GameTargetGeneration
+@@ -282,6 +426,10 @@ begin
      CurrentGeneration := GameTextureGeneration;
    if (Handle <> nil) and (Generation <> CurrentGeneration) then
    begin
@@ -189,22 +213,25 @@ index 1aca9ba..7679fdf 100644
      SDL_DestroyTexture(Handle);
      Handle := nil;
      // Ordinary textures have authoritative CPU pixels. Render targets do not:
-@@ -299,6 +427,14 @@ begin
+@@ -298,7 +446,17 @@ begin
+   TextureFormat := PixelFormat(Desc.Format);
    if Target then
      TextureFormat := SDL_PIXELFORMAT_ARGB8888;
-   Handle := SDL_CreateTexture(GameSDLRenderer, TextureFormat, Access, Desc.Width, Desc.Height);
 +{$IFDEF CTR}
++  Handle := CreateHandle;
 +  if Handle = nil then
 +  begin
 +    // Release textures retired by other threads and try once more.
 +    CollectTextures;
-+    Handle := SDL_CreateTexture(GameSDLRenderer, TextureFormat, Access, Desc.Width, Desc.Height);
++    Handle := CreateHandle;
 +  end;
++{$ELSE}
+   Handle := SDL_CreateTexture(GameSDLRenderer, TextureFormat, Access, Desc.Width, Desc.Height);
 +{$ENDIF}
    Require(Handle <> nil, string(SDL_GetError));
    Generation := CurrentGeneration;
  end;
-@@ -311,6 +447,12 @@ begin
+@@ -311,6 +469,12 @@ begin
    Realize;
    if Dirty then
    begin
@@ -217,7 +244,7 @@ index 1aca9ba..7679fdf 100644
      if PixelFormat(Desc.Format) = TextureFormat then
        Check(SDL_UpdateTexture(Handle, nil, Pixels, Pitch))
      else
-@@ -331,6 +473,9 @@ begin
+@@ -331,6 +495,9 @@ begin
        Check(SDL_UpdateTexture(Handle, nil, @Converted[0], Desc.Width * 4));
      end;
      Dirty := False;
@@ -227,7 +254,7 @@ index 1aca9ba..7679fdf 100644
    end;
  end;
  
-@@ -369,12 +514,31 @@ begin
+@@ -369,12 +536,31 @@ begin
      X := Rect.Left;
      Y := Rect.Top;
    end;
@@ -259,7 +286,7 @@ index 1aca9ba..7679fdf 100644
    Data.Bits := PByte(Pixels) + Y * Pitch + X * Bpp;
    Data.Pitch := Pitch;
    Locked := True;
-@@ -383,6 +547,18 @@ end;
+@@ -383,6 +569,18 @@ end;
  procedure TSDLStorage.Unlock;
  begin
    Require(Locked, 'unlock without lock');
@@ -278,7 +305,7 @@ index 1aca9ba..7679fdf 100644
    if not ReadOnly then
      Dirty := True;
    Locked := False;
-@@ -609,7 +785,20 @@ end;
+@@ -609,7 +807,20 @@ end;
  
  function TSDLDevice.GetAvailableTextureMem: Cardinal;
  begin
@@ -299,7 +326,7 @@ index 1aca9ba..7679fdf 100644
  end; // Cache budget, not a physical VRAM query.
  function TSDLDevice.CreateTexture(
      Width, Height, Levels, Usage, Format, Pool: Cardinal;
-@@ -618,7 +807,21 @@ function TSDLDevice.CreateTexture(
+@@ -618,7 +829,21 @@ function TSDLDevice.CreateTexture(
  ): LongInt;
  begin
    Require((Levels <= 1) and (Usage = 0) and (SharedHandle = nil), 'texture options');
@@ -321,7 +348,7 @@ index 1aca9ba..7679fdf 100644
    Result := 0;
  end;
  function TSDLDevice.CreateRenderTarget(
-@@ -657,7 +860,15 @@ begin
+@@ -657,7 +882,15 @@ begin
            and (A.Desc.Format = B.Desc.Format),
        'texture copy dimensions'
    );
@@ -337,7 +364,7 @@ index 1aca9ba..7679fdf 100644
    B.Dirty := True;
    Result := 0;
  end;
-@@ -675,6 +886,9 @@ begin
+@@ -675,6 +908,9 @@ begin
            and (A.Desc.Height = B.Desc.Height),
        'readback dimensions'
    );
@@ -347,7 +374,7 @@ index 1aca9ba..7679fdf 100644
    A.ReadPixels(B.Pixels, B.Pitch, B.Desc.Format);
    B.Dirty := True;
    Result := 0;
-@@ -1288,7 +1502,35 @@ begin
+@@ -1288,7 +1524,35 @@ begin
    Result := TSDLGraphics.Create;
  end;
  
@@ -384,10 +411,34 @@ index 1aca9ba..7679fdf 100644
  finalization
    CollectTextures;
 diff --git a/platform/GameSystem.pas b/platform/GameSystem.pas
-index 93501b6..d488917 100644
+index 93501b6..1b2a7d3 100644
 --- a/platform/GameSystem.pas
 +++ b/platform/GameSystem.pas
-@@ -122,7 +122,15 @@ begin
+@@ -21,6 +21,12 @@ function GameCpuClockMHz: Double;
+ function GameUserDirectory: UnicodeString;
+ function NativeGamePath(const Path: UnicodeString): UnicodeString;
+ procedure SetGameDirectory(const Path: UnicodeString);
++{$IFDEF CTR}
++// Native path of a data package. assets.txt in the game folder may name a
++// folder of converted packages (port3ds/tools/assetconv); a package found
++// there replaces the one in DATA.
++function CtrPackagePath(const Path: UnicodeString): UnicodeString;
++{$ENDIF}
+ 
+ implementation
+ 
+@@ -29,6 +35,10 @@ uses
+   Classes,
+   Math,
+   SDL2
++{$IFDEF CTR}
++  ,
++  Ctru
++{$ENDIF}
+ {$IFDEF UNIX}
+   ,
+   BaseUnix,
+@@ -122,7 +132,15 @@ begin
    end;
  end;
  
@@ -403,7 +454,7 @@ index 93501b6..d488917 100644
  {$IFNDEF MSWINDOWS}
  var
    Heap: TFPCHeapStatus;
-@@ -191,6 +199,15 @@ begin
+@@ -191,6 +209,15 @@ begin
    Heap := GetFPCHeapStatus;
    Status.TotalVirtual := QWord(High(PtrInt));
    Status.AvailVirtual := Status.TotalVirtual - Min(Status.TotalVirtual, QWord(Heap.CurrHeapSize));
@@ -419,7 +470,7 @@ index 93501b6..d488917 100644
    if Status.TotalPhys <> 0 then
      Status.MemoryLoad := ((Status.TotalPhys - Status.AvailPhys) * 100) div Status.TotalPhys;
    Result := Status.TotalPhys <> 0;
-@@ -203,6 +220,124 @@ begin
+@@ -203,6 +230,124 @@ begin
    Result := Cardinal(GetTickCount64);
  end;
  
@@ -544,7 +595,7 @@ index 93501b6..d488917 100644
  {$IFDEF UNIX}
  function ResolveGamePathCase(const Path: UnicodeString): UnicodeString;
  var
-@@ -233,6 +368,7 @@ begin
+@@ -233,6 +378,7 @@ begin
      end;
  end;
  {$ENDIF}
@@ -552,7 +603,7 @@ index 93501b6..d488917 100644
  
  function NativeGamePath(const Path: UnicodeString): UnicodeString;
  var
-@@ -243,13 +379,17 @@ begin
+@@ -243,13 +389,55 @@ begin
    for Index := 1 to Length(Result) do
      if (Result[Index] = '\') or (Result[Index] = '/') then
        Result[Index] := DirectorySeparator;
@@ -563,6 +614,44 @@ index 93501b6..d488917 100644
 +{$IFEND}
  end;
  
++{$IFDEF CTR}
++var
++  AssetFolder: UnicodeString;
++  AssetFolderRead: Boolean;
++
++function CtrPackagePath(const Path: UnicodeString): UnicodeString;
++var
++  Lines: TStringList;
++  Candidate: UnicodeString;
++begin
++  if not AssetFolderRead then
++  begin
++    AssetFolderRead := True;
++    Lines := TStringList.Create;
++    try
++      if FileExists(NativeGamePath('assets.txt')) then
++        Lines.LoadFromFile(AnsiString(NativeGamePath('assets.txt')));
++      if Lines.Count > 0 then
++        AssetFolder := UnicodeString(Trim(Lines[0]));
++    except
++      AssetFolder := '';
++    end;
++    Lines.Free;
++    if AssetFolder <> '' then
++      CtrLog('Asset set: ' + AnsiString(AssetFolder));
++  end;
++  Result := NativeGamePath(Path);
++  if AssetFolder = '' then
++    Exit;
++  Candidate := NativeGamePath(AssetFolder + '\' + ExtractFileName(Path));
++  if FileExists(Candidate) then
++  begin
++    Result := Candidate;
++    CtrLog('Package ' + AnsiString(Candidate));
++  end;
++end;
++{$ENDIF}
++
  function GameUserDirectory: UnicodeString;
  begin
 +{$IFDEF CTR}
@@ -572,7 +661,7 @@ index 93501b6..d488917 100644
  {$IFDEF DARWIN}
    Result := GetUserDir + 'Library/Application Support/SpaceRangersHD/';
  {$ELSE}
-@@ -298,6 +438,10 @@ begin
+@@ -298,6 +486,10 @@ begin
    // ARM's timer frequency is not its CPU clock. Keep the game's 1500 MHz
    // fallback when the OS does not report a processor frequency.
    Result := 1500;
@@ -583,7 +672,7 @@ index 93501b6..d488917 100644
  {$IFDEF DARWIN}
    Size := SizeOf(Frequency);
    if (FPsysctlbyname('hw.cpufrequency', @Frequency, @Size, nil, 0) = 0)
-@@ -337,6 +481,15 @@ begin
+@@ -337,6 +529,15 @@ begin
  {$ENDIF}
  end;
  
@@ -700,6 +789,77 @@ index 1ebd867..fb6c406 100644
      Memory := GameHeap.HeapAlloc(GameHeap.GetProcessHeap, GameHeap.HEAP_ZERO_MEMORY, ByteCount);
      if Memory <> nil then
        AppendLogLineThreadSafe('success')
+diff --git a/source/graphics/GI_GAI.pas b/source/graphics/GI_GAI.pas
+index 393bbd9..1aa5e94 100644
+--- a/source/graphics/GI_GAI.pas
++++ b/source/graphics/GI_GAI.pas
+@@ -1040,6 +1040,9 @@ var
+   Texture: IDirect3DTexture9;
+   FrameOrigin: TPoint;
+   Bounds, FirstBounds: TRect;
++{$IFDEF CTR}
++  Shift, StoredWidth, StoredHeight: Integer;
++{$ENDIF}
+ begin
+   if SequenceFrame < 0 then
+     Exit;
+@@ -1270,6 +1273,29 @@ begin
+     begin
+       if FirstFrameImageCache <> nil then
+       begin
++{$IFDEF CTR}
++        // An animation and first image downscaled by the asset converter
++        // are composed at the stored size, in a texture of the logical size.
++        Shift := 0;
++        if HardwareRenderingEnabled
++            and ((Image = nil) or (Image.GetScaleShift = First.Image.ScaleShift)) then
++          Shift := First.Image.ScaleShift;
++        StoredWidth := (Width + (1 shl Shift) - 1) shr Shift;
++        StoredHeight := (Height + (1 shl Shift) - 1) shr Shift;
++        if (CachedPlaybackGraphBuf = nil)
++            or (CachedPlaybackGraphBuf.Width <> StoredWidth)
++            or (CachedPlaybackGraphBuf.Height <> StoredHeight)
++            or (CachedPlaybackGraphBuf.CtrScaleShift <> Shift) then
++        begin
++          LastCachedFrameIndex := -1;
++          if CachedPlaybackGraphBuf = nil then
++            CachedPlaybackGraphBuf := TGraphBufGR.Create(True);
++          if Shift > 0 then
++            CachedPlaybackGraphBuf.CtrAllocateScaledRgba(Width, Height, Shift)
++          else
++            CachedPlaybackGraphBuf.AllocateRgba(Width, Height, Width * 4);
++        end;
++{$ELSE}
+         if (CachedPlaybackGraphBuf = nil)
+             or (CachedPlaybackGraphBuf.Width <> Width)
+             or (CachedPlaybackGraphBuf.Height <> Height) then
+@@ -1279,6 +1305,7 @@ begin
+             CachedPlaybackGraphBuf := TGraphBufGR.Create(True);
+           CachedPlaybackGraphBuf.AllocateRgba(Width, Height, Width * 4);
+         end;
++{$ENDIF}
+         if LastCachedFrameIndex <> SequenceFrame then
+         begin
+           FrameIndex := LastCachedFrameIndex + 1;
+@@ -1298,6 +1325,18 @@ begin
+               if (Frame <> nil)
+                   and (Frame.GetContentSize.X > 0)
+                   and (Frame.GetContentSize.Y > 0) then
++{$IFDEF CTR}
++                if Shift > 0 then
++                  Frame.DrawStoredToGraphBuf(
++                      CachedPlaybackGraphBuf,
++                      (Frame.GetBoundsRect.Left - Bounds.Left) shr Shift,
++                      (Frame.GetBoundsRect.Top - Bounds.Top) shr Shift,
++                      Classes.Rect(0, 0, CachedPlaybackGraphBuf.Width, CachedPlaybackGraphBuf.Height),
++                      0,
++                      Alpha
++                  )
++                else
++{$ENDIF}
+                 Frame.DrawToGraphBuf(
+                     CachedPlaybackGraphBuf,
+                     Frame.GetBoundsRect.Left - Bounds.Left,
 diff --git a/source/graphics/GI_GI.pas b/source/graphics/GI_GI.pas
 index 2669b27..74a56f7 100644
 --- a/source/graphics/GI_GI.pas
@@ -761,10 +921,87 @@ index be7a584..141e5de 100644
    begin
      Texture.GetLevelDesc(0, Desc);
 diff --git a/source/graphics/GR_GraphBuf.pas b/source/graphics/GR_GraphBuf.pas
-index 806e7c5..c31ede3 100644
+index 806e7c5..57d80fa 100644
 --- a/source/graphics/GR_GraphBuf.pas
 +++ b/source/graphics/GR_GraphBuf.pas
-@@ -2474,6 +2474,12 @@ begin
+@@ -250,6 +250,13 @@ type
+     procedure LoadFromScreen(UnusedOption: Byte);
+     procedure LockTexture(ReadOnly: Boolean);
+     procedure UnlockTexture;
++{$IFDEF CTR}
++  public
++    // A buffer of a downscaled playback animation (TgaiGI.Draw): Width x
++    // Height stored pixels in a texture of the logical size.
++    CtrScaleShift: Integer;
++    procedure CtrAllocateScaledRgba(LogicalWidth, LogicalHeight, Shift: Integer);
++{$ENDIF}
+     procedure ConvertBgraToRgb24;
+     procedure DrawAntialiasedCircle16(
+         Center: TPoint;
+@@ -282,6 +289,9 @@ uses
+   Classes,
+   FPImage,
+   FPWriteJPEG,
++{$IFDEF CTR}
++  GameGraphics,
++{$ENDIF}
+   GameSystem;
+ 
+ procedure TPixelFormatGR.RebuildChannelMetrics;
+@@ -453,6 +463,9 @@ begin
+   Texture := nil;
+   UsesTextureStorage := False;
+   KeepTextureUntilReplacement := False;
++{$IFDEF CTR}
++  CtrScaleShift := 0;
++{$ENDIF}
+   Width := 0;
+   Height := 0;
+   PitchBytes := 0;
+@@ -591,6 +604,42 @@ begin
+   end;
+ end;
+ 
++{$IFDEF CTR}
++procedure TGraphBufGR.CtrAllocateScaledRgba(LogicalWidth, LogicalHeight, Shift: Integer);
++var
++  Bits: Pointer;
++  Pitch, TextureShift: Integer;
++begin
++  Clear;
++  Width := (LogicalWidth + (1 shl Shift) - 1) shr Shift;
++  Height := (LogicalHeight + (1 shl Shift) - 1) shr Shift;
++  BitsPerPixel := 32;
++  BytesPerPixel := SizeOf(TColorRGBA);
++  CtrTextureMinShift := Shift;
++  try
++    Texture := GR_CreateTexture(LogicalWidth, LogicalHeight, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED);
++  finally
++    CtrTextureMinShift := 0;
++  end;
++  if (Texture <> nil) and CtrBeginScaledTextureFill(Texture, TextureShift, Bits, Pitch) then
++  begin
++    CtrEndScaledTextureFill(Texture);
++    if TextureShift = Shift then
++    begin
++      PitchBytes := Pitch;
++      UsesTextureStorage := True;
++      CtrScaleShift := Shift;
++      Exit;
++    end;
++  end;
++  // Not expected (the texture size is the logical size, at most 1024 shl
++  // Shift); fall back to plain memory, which GetTexture uploads as usual.
++  Texture := nil;
++  PitchBytes := Width * SizeOf(TColorRGBA);
++  Pixels := AllocEC(PitchBytes * Height);
++end;
++{$ENDIF}
++
+ procedure TGraphBufGR.AllocateRgbTight(Width, Height: Integer);
+ begin
+   Clear;
+@@ -2474,6 +2523,12 @@ begin
      if BitsPerPixel = 24 then
      begin
        Texture := GR_CreateTexture(Width, Height, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED);
@@ -777,7 +1014,7 @@ index 806e7c5..c31ede3 100644
        Texture.LockRect(0, Locked, nil, 0);
        CopyRgbToOpaqueRgba(Locked.Bits, Locked.Pitch, Pixels, PitchBytes, Width, Height);
        Texture.UnlockRect(0);
-@@ -2484,6 +2490,10 @@ begin
+@@ -2484,6 +2539,10 @@ begin
          Texture := GR_CreateTexture(Width, Height, D3DFMT_R5G6B5, D3DPOOL_MANAGED)
        else if BitsPerPixel = 32 then
          Texture := GR_CreateTexture(Width, Height, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED);
@@ -788,8 +1025,48 @@ index 806e7c5..c31ede3 100644
        Texture.LockRect(0, Locked, nil, 0);
        RowBytes := Width * BytesPerPixel;
        Y := 0;
+@@ -2633,6 +2692,9 @@ end;
+ procedure TGraphBufGR.LockTexture(ReadOnly: Boolean);
+ var
+   Locked: TD3DLockedRect;
++{$IFDEF CTR}
++  Shift: Integer;
++{$ENDIF}
+ begin
+   if TextureLockedReadOnly and not ReadOnly then
+     UnlockTexture;
+@@ -2643,6 +2705,14 @@ begin
+       TextureLocked := False;
+       Exit;
+     end;
++{$IFDEF CTR}
++    if (CtrScaleShift > 0) and CtrBeginScaledTextureFill(Texture, Shift, Pixels, PitchBytes) then
++    begin
++      TextureLockedReadOnly := ReadOnly;
++      TextureLocked := True;
++      Exit;
++    end;
++{$ENDIF}
+     if ReadOnly then
+       Texture.LockRect(0, Locked, nil, D3DLOCK_READONLY)
+     else
+@@ -2660,6 +2730,14 @@ begin
+   begin
+     TextureLocked := False;
+     TextureLockedReadOnly := False;
++{$IFDEF CTR}
++    if UsesTextureStorage and (Texture <> nil) and (CtrScaleShift > 0) then
++    begin
++      Pixels := nil;
++      CtrEndScaledTextureFill(Texture);
++    end
++    else
++{$ENDIF}
+     if UsesTextureStorage and (Texture <> nil) then
+     begin
+       Pixels := nil;
 diff --git a/source/graphics/GR_gi.pas b/source/graphics/GR_gi.pas
-index 41e016b..b101dd9 100644
+index 41e016b..ae836f4 100644
 --- a/source/graphics/GR_gi.pas
 +++ b/source/graphics/GR_gi.pas
 @@ -117,6 +117,9 @@ type
@@ -802,10 +1079,74 @@ index 41e016b..b101dd9 100644
      procedure LoadCompressedGiBytes(BufferPtr: Pointer; ByteCount: Integer);
      function GetBoundsRect: TRect;
      function GetContentSize: TPoint;
-@@ -212,6 +215,24 @@ begin
-   Header := Data;
+@@ -153,8 +156,38 @@ type
+     );
+     procedure CreateFromGraphBuf(GraphBuf: TGraphBufGR; StorageMode: Integer);
+     procedure CreateFormat2FromGraphBuf(GraphBuf: TGraphBufGR; TopLeft: TPoint);
++{$IFDEF CTR}
++  public
++    // An image the asset converter downscaled (port3ds/tools/assetconv) is
++    // an ordinary image of the stored size, so the decoders work on it
++    // unchanged; its header marks it with the downscale (1 shl ScaleShift
++    // pixels per stored pixel) and the bounds it stands for, which the
++    // Get* functions above report. Textures keep the stored size (see
++    // CtrTextureMinShift).
++    ScaleShift: Integer;
++    LogicalBounds: TRect;
++    procedure ParseScaleMarker;
++    function GetStoredSize: TPoint;
++    procedure DrawStoredToGraphBuf(
++        GraphBuf: TGraphBufGR;
++        X: Integer;
++        Y: Integer;
++        DrawRect: TRect;
++        BlendMode: Byte;
++        Alpha: Byte
++    );
++    procedure DecodeStoredToGraphBuf(GraphBuf: TGraphBufGR; Keep16BitPixels: Boolean);
++{$ENDIF}
+   end;
+ 
++{$IFDEF CTR}
++const
++  // TgiHeaderGR.Version of a downscaled image is GiScaleMarker + ScaleShift
++  // (originals have 1). Gap38 then holds the logical bounds: Left and Top as
++  // SmallInt, Width and Height as Word.
++  GiScaleMarker = $53430000;
++{$ENDIF}
++
+ procedure PrepareRawGiColorCache(Data: Pointer);
+ 
+ implementation
+@@ -186,6 +219,9 @@ begin
+   DataSize := 0;
+   UsesExternalData := False;
+   Header := nil;
++{$IFDEF CTR}
++  ScaleShift := 0;
++{$ENDIF}
  end;
  
+ function TgiGR.IsEmpty: Boolean;
+@@ -200,6 +236,9 @@ begin
+   DataSize := ByteCount;
+   UsesExternalData := True;
+   Header := Data;
++{$IFDEF CTR}
++  ParseScaleMarker;
++{$ENDIF}
+ end;
+ 
+ procedure TgiGR.LoadRawGiFromBuffer(SourceBuffer: TBufEC);
+@@ -210,7 +249,31 @@ begin
+   System.Move(Pointer(SourceBuffer.Data)^, Pointer(Data)^, DataSize);
+   UsesExternalData := False;
+   Header := Data;
++{$IFDEF CTR}
++  ParseScaleMarker;
++{$ENDIF}
++end;
++
 +{$IFDEF CTR}
 +// Like LoadRawGiFromBuffer, but adopts the buffer's memory instead of copying
 +// it: menu backgrounds are 13 MiB, too much to hold twice on the 3DS. Both
@@ -821,13 +1162,23 @@ index 41e016b..b101dd9 100644
 +  SourceBuffer.Position := 0;
 +  UsesExternalData := False;
 +  Header := Data;
-+end;
++{$IFDEF CTR}
++  ParseScaleMarker;
 +{$ENDIF}
-+
+ end;
++{$ENDIF}
+ 
  procedure TgiGR.LoadCompressedGiBytes(BufferPtr: Pointer; ByteCount: Integer);
  begin
-   ClearData;
-@@ -236,17 +257,30 @@ end;
+@@ -231,22 +294,44 @@ begin
+   begin
+     Header := Data;
+     UsesExternalData := False;
++{$IFDEF CTR}
++    ParseScaleMarker;
++{$ENDIF}
+   end;
+ end;
  
  function TgiGR.GetBoundsRect: TRect;
  begin
@@ -835,6 +1186,8 @@ index 41e016b..b101dd9 100644
 +  // An image whose load failed for lack of memory has no header; draw nothing.
 +  if Header = nil then
 +    Exit(Rect(0, 0, 0, 0));
++  if ScaleShift > 0 then
++    Exit(LogicalBounds);
 +{$ENDIF}
    Result := Header.Bounds;
  end;
@@ -844,6 +1197,8 @@ index 41e016b..b101dd9 100644
 +{$IFDEF CTR}
 +  if Header = nil then
 +    Exit(Point(0, 0));
++  if ScaleShift > 0 then
++    Exit(Point(LogicalBounds.Right - LogicalBounds.Left, LogicalBounds.Bottom - LogicalBounds.Top));
 +{$ENDIF}
    Result.X := Header.Bounds.Right - Header.Bounds.Left;
    Result.Y := Header.Bounds.Bottom - Header.Bounds.Top;
@@ -854,10 +1209,161 @@ index 41e016b..b101dd9 100644
 +{$IFDEF CTR}
 +  if Header = nil then
 +    Exit(Point(0, 0));
++  if ScaleShift > 0 then
++    Exit(LogicalBounds.TopLeft);
 +{$ENDIF}
    Result.X := Header.Bounds.Left;
    Result.Y := Header.Bounds.Top;
  end;
+@@ -278,6 +363,15 @@ begin
+   Result.Top := Rect.Top;
+   Result.Right := Rect.Right;
+   Result.Bottom := Rect.Bottom;
++{$IFDEF CTR}
++  if ScaleShift > 0 then
++  begin
++    Result.Left := Result.Left shl ScaleShift;
++    Result.Top := Result.Top shl ScaleShift;
++    Result.Right := Result.Right shl ScaleShift;
++    Result.Bottom := Result.Bottom shl ScaleShift;
++  end;
++{$ENDIF}
+ end;
+ 
+ procedure TgiGR.BuildPalettedFormat4ColorCache;
+@@ -305,7 +399,11 @@ begin
+   end;
+ end;
+ 
++{$IFDEF CTR}
++procedure TgiGR.DrawStoredToGraphBuf(
++{$ELSE}
+ procedure TgiGR.DrawToGraphBuf(
++{$ENDIF}
+     GraphBuf: TGraphBufGR;
+     X, Y: Integer;
+     DrawRect: TRect;
+@@ -499,7 +597,11 @@ begin
+   end;
+ end;
+ 
++{$IFDEF CTR}
++procedure TgiGR.DecodeStoredToGraphBuf(GraphBuf: TGraphBufGR; Keep16BitPixels: Boolean);
++{$ELSE}
+ procedure TgiGR.DecodeToGraphBuf(GraphBuf: TGraphBufGR; Keep16BitPixels: Boolean);
++{$ENDIF}
+ var
+   Plane, PalettePlane: PgiPlaneGR;
+   Y: Cardinal;
+@@ -1057,6 +1159,108 @@ begin
+   Plane.Bounds := Header.Bounds;
+ end;
+ 
++{$IFDEF CTR}
++procedure TgiGR.ParseScaleMarker;
++begin
++  ScaleShift := 0;
++  if (Header = nil) or ((Cardinal(Header.Version) and $FFFF0000) <> GiScaleMarker) then
++    Exit;
++  ScaleShift := Header.Version and $FF;
++  LogicalBounds.Left := PSmallInt(@Header.Gap38[0])^;
++  LogicalBounds.Top := PSmallInt(@Header.Gap38[2])^;
++  LogicalBounds.Right := LogicalBounds.Left + PWord(@Header.Gap38[4])^;
++  LogicalBounds.Bottom := LogicalBounds.Top + PWord(@Header.Gap38[6])^;
++end;
++
++function TgiGR.GetStoredSize: TPoint;
++begin
++  if Header = nil then
++    Exit(Point(0, 0));
++  Result.X := Header.Bounds.Right - Header.Bounds.Left;
++  Result.Y := Header.Bounds.Bottom - Header.Bounds.Top;
++end;
++
++var
++  WarnedScaledDraw: Boolean;
++
++// X, Y place the logical top left. A downscaled image is drawn one logical
++// pixel at a time, placing the stored image so that the stored pixel covering
++// that logical pixel lands on it. This serves pixel hit tests (one pixel);
++// the software renderer paths that draw whole images are not used with
++// hardware rendering.
++procedure TgiGR.DrawToGraphBuf(
++    GraphBuf: TGraphBufGR;
++    X, Y: Integer;
++    DrawRect: TRect;
++    BlendMode, Alpha: Byte
++);
++var
++  Area: TRect;
++  PX, PY: Integer;
++begin
++  if (Header = nil) or (ScaleShift = 0) then
++  begin
++    if Header <> nil then
++      DrawStoredToGraphBuf(GraphBuf, X, Y, DrawRect, BlendMode, Alpha);
++    Exit;
++  end;
++  Area := Classes.Rect(
++      X, Y, X + LogicalBounds.Right - LogicalBounds.Left, Y + LogicalBounds.Bottom - LogicalBounds.Top);
++  if not IntersectRect(Area, Area, DrawRect) then
++    Exit;
++  if ((Area.Right - Area.Left) * (Area.Bottom - Area.Top) > 1) and not WarnedScaledDraw then
++  begin
++    WarnedScaledDraw := True;
++    AppendLogLineThreadSafe('DrawToGraphBuf: drawing a downscaled image pixel by pixel');
++  end;
++  for PY := Area.Top to Area.Bottom - 1 do
++    for PX := Area.Left to Area.Right - 1 do
++      DrawStoredToGraphBuf(
++          GraphBuf,
++          PX - ((PX - X) shr ScaleShift),
++          PY - ((PY - Y) shr ScaleShift),
++          Classes.Rect(PX, PY, PX + 1, PY + 1),
++          BlendMode,
++          Alpha
++      );
++end;
++
++// Decodes at the stored size, then enlarges a downscaled image to its
++// logical size.
++procedure TgiGR.DecodeToGraphBuf(GraphBuf: TGraphBufGR; Keep16BitPixels: Boolean);
++var
++  Stored: TGraphBufGR;
++  Bpp, X, Y, Width, Height: Integer;
++  Source, Dest: PByte;
++begin
++  if (ScaleShift = 0) or (Header.Format > 4) then
++  begin
++    DecodeStoredToGraphBuf(GraphBuf, Keep16BitPixels);
++    Exit;
++  end;
++  Stored := TGraphBufGR.Create(False);
++  try
++    DecodeStoredToGraphBuf(Stored, Keep16BitPixels);
++    if (Header.Format = 0) and (Header.AlphaMask = 0) and Keep16BitPixels then
++      Bpp := 2
++    else
++      Bpp := 4;
++    Width := LogicalBounds.Right - LogicalBounds.Left;
++    Height := LogicalBounds.Bottom - LogicalBounds.Top;
++    GraphBuf.AllocateRgba(Width, Height, Width * SizeOf(TColorRGBA));
++    for Y := 0 to Height - 1 do
++    begin
++      Source := PByte(Stored.GetPixels) + (Y shr ScaleShift) * Stored.PitchBytes;
++      Dest := PByte(GraphBuf.GetPixels) + Y * GraphBuf.PitchBytes;
++      for X := 0 to Width - 1 do
++        System.Move((Source + (X shr ScaleShift) * Bpp)^, (Dest + X * Bpp)^, Bpp);
++    end;
++  finally
++    Stored.Free;
++  end;
++end;
++{$ENDIF}
++
+ procedure PrepareRawGiColorCache(Data: Pointer);
+ var
+   Image: TgiGR;
 diff --git a/source/resources/EC_Cache.pas b/source/resources/EC_Cache.pas
 index c7aacfa..adf08a2 100644
 --- a/source/resources/EC_Cache.pas
@@ -942,7 +1448,7 @@ index c7aacfa..adf08a2 100644
      begin
        RemainingBytes := RemainingBytes - Removed.ResidentBytes;
 diff --git a/source/resources/EC_CacheGAI.pas b/source/resources/EC_CacheGAI.pas
-index 1c8fc26..c21afb4 100644
+index 1c8fc26..3fd0fc9 100644
 --- a/source/resources/EC_CacheGAI.pas
 +++ b/source/resources/EC_CacheGAI.pas
 @@ -34,6 +34,9 @@ type
@@ -955,7 +1461,7 @@ index 1c8fc26..c21afb4 100644
      constructor Create;
      destructor Destroy; override;
      function GetFrameCount: Integer;
-@@ -59,6 +62,22 @@ type
+@@ -59,6 +62,23 @@ type
      function GetSequenceFrameIndex(SequenceIndex: Integer; FrameInSequence: Integer): Integer;
      function GetSequenceFrameDelay(SequenceIndex: Integer; FrameInSequence: Integer): Integer;
      procedure ApplyAB2BackgroundFixup(SourceBuffer: TBufEC; const ResourceKey: WideString);
@@ -974,16 +1480,18 @@ index 1c8fc26..c21afb4 100644
 +    function LoadStreamedFrameGi(FrameIndex: Integer): TgiGR;
 +    function ReadStreamedFrame(FrameIndex: Integer; var Size: Integer): Boolean;
 +    procedure KeepRecentSurface(FrameIndex: Integer);
++    function GetScaleShift: Integer;
 +{$ENDIF}
    end;
  
  function AcquireCachedGai(Control: TCacheControlEC): TCGaiEC;
-@@ -66,12 +85,23 @@ function AcquireCachedGai(Control: TCacheControlEC): TCGaiEC;
+@@ -66,12 +86,24 @@ function AcquireCachedGai(Control: TCacheControlEC): TCGaiEC;
  implementation
  
  uses
 +{$IFDEF CTR}
 +  EC_Data,
++  GameGraphics,
 +  GameSystem,
 +{$ENDIF}
    EC_Mem,
@@ -1002,7 +1510,7 @@ index 1c8fc26..c21afb4 100644
  // Native directory indexing adds the two header dwords separately.
  function ReadGaiSequenceOffset(
      const Table: PGaiSequenceTableHeader;
-@@ -121,6 +151,10 @@ begin
+@@ -121,6 +153,10 @@ begin
    inherited Create;
    DecodedFrameGi := TgiGR.Create;
    FrameSurfaceCache := nil;
@@ -1013,7 +1521,7 @@ index 1c8fc26..c21afb4 100644
  end;
  
  destructor TCGaiEC.Destroy;
-@@ -131,6 +165,12 @@ begin
+@@ -131,6 +167,12 @@ begin
      RawGaiData := nil;
    end;
    DecodedFrameGi.Free;
@@ -1026,7 +1534,44 @@ index 1c8fc26..c21afb4 100644
    if FrameSurfaceCache <> nil then
    begin
      FreeTextureCache(FrameSurfaceCache);
-@@ -198,6 +238,10 @@ begin
+@@ -166,6 +208,9 @@ var
+   Locked: TD3DLockedRect;
+   FrameSize, Origin: TPoint;
+   Frame: TgiGR;
++{$IFDEF CTR}
++  Shift: Integer;
++{$ENDIF}
+ begin
+   if FrameSurfaceCache = nil then
+     FrameSurfaceCache := CreateTextureCache;
+@@ -181,10 +226,26 @@ begin
+         Result := nil;
+         Exit;
+       end;
++{$IFDEF CTR}
++      // A downscaled frame keeps its stored size (see TgiGR.ScaleShift).
++      CtrTextureMinShift := Frame.ScaleShift;
++{$ENDIF}
+       if (Frame.Header.Format = 0) and (Frame.Header.AlphaMask = 0) then
+         Texture := GR_CreateTexture(FrameSize.X, FrameSize.Y, D3DFMT_R5G6B5, D3DPOOL_MANAGED)
+       else
+         Texture := GR_CreateTexture(FrameSize.X, FrameSize.Y, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED);
++{$IFDEF CTR}
++      CtrTextureMinShift := 0;
++      if (Texture <> nil) and (Frame.ScaleShift > 0)
++          and CtrBeginScaledTextureFill(Texture, Shift, Locked.Bits, Locked.Pitch) then
++      begin
++        if Shift = Frame.ScaleShift then
++          Frame.DecodeToPixels(
++              Locked.Bits, Locked.Pitch, Frame.GetStoredSize.X, Frame.GetStoredSize.Y, True);
++        CtrEndScaledTextureFill(Texture);
++      end
++      else
++{$ENDIF}
+       if Texture <> nil then
+       begin
+         Texture.LockRect(0, Locked, nil, 0);
+@@ -198,6 +259,10 @@ begin
        CachedFrameOrigins[FrameIndex].X := Origin.X - Header.Bounds.Left;
        CachedFrameOrigins[FrameIndex].Y := Origin.Y - Header.Bounds.Top;
        FrameSurfaceCache.SetSurface(Texture, FrameIndex);
@@ -1037,7 +1582,7 @@ index 1c8fc26..c21afb4 100644
      end;
    end;
    Result := Texture;
-@@ -212,6 +256,10 @@ function TCGaiEC.LoadFrameGi(FrameIndex: Integer): TgiGR;
+@@ -212,6 +277,10 @@ function TCGaiEC.LoadFrameGi(FrameIndex: Integer): TgiGR;
  var
    Offset: Integer;
  begin
@@ -1048,7 +1593,7 @@ index 1c8fc26..c21afb4 100644
    Result := nil;
    if (FrameIndex < 0) or (Header.FrameCount <= FrameIndex) then
      Exit;
-@@ -261,7 +309,17 @@ end;
+@@ -261,7 +330,17 @@ end;
  function TCGaiEC.IsFrameCompressed(FrameIndex: Integer): Boolean;
  var
    Offset: Integer;
@@ -1066,7 +1611,7 @@ index 1c8fc26..c21afb4 100644
    Offset :=
        ReadDWordEC(
            AddPointerOffset(RawGaiData, FrameIndex * SizeOf(TGaiFrameEntry) + SizeOf(TGaiHeader))
-@@ -369,10 +427,29 @@ procedure TCGaiEC.LoadFromConfigBuffer(SourceBuffer: TBufEC; const LoadOption: W
+@@ -369,10 +448,29 @@ procedure TCGaiEC.LoadFromConfigBuffer(SourceBuffer: TBufEC; const LoadOption: W
  var
    FrameIndex: Integer;
    Frame: TgiGR;
@@ -1096,7 +1641,7 @@ index 1c8fc26..c21afb4 100644
    try
      RawGaiData := AllocEC(SourceBuffer.DataSize);
      System.Move(Pointer(SourceBuffer.Data)^, Pointer(RawGaiData)^, SourceBuffer.DataSize);
-@@ -381,8 +458,9 @@ begin
+@@ -381,8 +479,9 @@ begin
      RawGaiData := nil;
      ResidentBytes := 0;
    end;
@@ -1107,7 +1652,7 @@ index 1c8fc26..c21afb4 100644
    begin
      AppendLogLineThreadSafe('Error Load Gai');
      Header := AllocClearEC(SizeOf(TGaiHeader));
-@@ -454,4 +532,134 @@ begin
+@@ -454,4 +553,144 @@ begin
    end;
  end;
  
@@ -1216,6 +1761,16 @@ index 1c8fc26..c21afb4 100644
 +  Result := DecodedFrameGi;
 +end;
 +
++// Downscale of an animation converted by port3ds/tools/assetconv: its header
++// ends in "SC" and the shift. Its frames are downscaled images (see
++// TgiGR.ScaleShift); playback animations are composed at the stored size.
++function TCGaiEC.GetScaleShift: Integer;
++begin
++  Result := 0;
++  if (Header <> nil) and (Header.Gap28[0] = Ord('S')) and (Header.Gap28[1] = Ord('C')) then
++    Result := Header.Gap28[2];
++end;
++
 +// A 700x700 frame is a 1024x1024 texture (4 MiB) on the 3DS, and the HD
 +// animations have hundreds of frames: keep only the frame being shown.
 +procedure TCGaiEC.KeepRecentSurface(FrameIndex: Integer);
@@ -1243,7 +1798,7 @@ index 1c8fc26..c21afb4 100644
 +
  end.
 diff --git a/source/resources/EC_CacheGI.pas b/source/resources/EC_CacheGI.pas
-index 8fe4c8b..f2c8421 100644
+index 8fe4c8b..cbc5013 100644
 --- a/source/resources/EC_CacheGI.pas
 +++ b/source/resources/EC_CacheGI.pas
 @@ -33,6 +33,16 @@ type
@@ -1263,7 +1818,7 @@ index 8fe4c8b..f2c8421 100644
      constructor Create;
      destructor Destroy; override;
      function GetTileOrigin(TileIndex: Integer): TPoint;
-@@ -45,11 +55,180 @@ function AcquireCachedGi(Control: TCacheControlEC): TCGiEC;
+@@ -45,11 +55,208 @@ function AcquireCachedGi(Control: TCacheControlEC): TCGiEC;
  implementation
  
  uses
@@ -1280,16 +1835,13 @@ index 8fe4c8b..f2c8421 100644
 +// Fills a texture above the 3DS GPU limit at its stored (downscaled) size
 +// straight from an uncompressed image, without a full-size buffer. The menu
 +// backgrounds are 4096x1600; a full-size copy would take another 13 MiB.
-+function FillScaledTextureFromRawGi(Texture: IDirect3DTexture9; Image: TgiGR): Boolean;
++// Shift is the downscale from the image's stored pixels to the texture's.
++procedure FillScaledTextureFromRawGi(Image: TgiGR; Bits: Pointer; Pitch, Shift: Integer);
 +var
-+  Shift, Pitch, Bpp, Width, Height, X, Y: Integer;
-+  Bits: Pointer;
++  Bpp, Width, Height, X, Y: Integer;
 +  Plane: PgiPlaneGR;
 +  Source, Dest: PByte;
 +begin
-+  Result := False;
-+  if (Image.Header.Format <> 0) or not CtrBeginScaledTextureFill(Texture, Shift, Bits, Pitch) then
-+    Exit;
 +  Plane := Image.GetPlane(0);
 +  if Plane.DataOffset = 0 then
 +    Exit;
@@ -1297,8 +1849,8 @@ index 8fe4c8b..f2c8421 100644
 +    Bpp := 2
 +  else
 +    Bpp := 4;
-+  Width := Image.GetContentSize.X;
-+  Height := Image.GetContentSize.Y;
++  Width := Image.GetStoredSize.X;
++  Height := Image.GetStoredSize.Y;
 +  Y := 0;
 +  while Y < Height do
 +  begin
@@ -1313,8 +1865,6 @@ index 8fe4c8b..f2c8421 100644
 +    end;
 +    Inc(Y, 1 shl Shift);
 +  end;
-+  CtrEndScaledTextureFill(Texture);
-+  Result := True;
 +end;
 +
 +type
@@ -1408,17 +1958,13 @@ index 8fe4c8b..f2c8421 100644
 +
 +// Format 2 counterpart of FillScaledTextureFromRawGi: the same planes and
 +// order as TgiGR.DecodeToPixels, drawn straight into the stored pixels.
-+function FillScaledTextureFromRleGi(Texture: IDirect3DTexture9; Image: TgiGR): Boolean;
++procedure FillScaledTextureFromRleGi(Image: TgiGR; Bits: Pointer; Pitch, Shift: Integer);
 +const
 +  PlaneModes: array[0..2] of TRleScaledMode = (rsmTrans, rsmTransAlpha, rsmAlpha);
 +var
-+  Shift, Pitch, Order, PlaneIndex: Integer;
-+  Bits: Pointer;
++  Order, PlaneIndex: Integer;
 +  Plane: PgiPlaneGR;
 +begin
-+  Result := False;
-+  if (Image.Header.Format <> 2) or not CtrBeginScaledTextureFill(Texture, Shift, Bits, Pitch) then
-+    Exit;
 +  for Order := 0 to 2 do
 +  begin
 +    PlaneIndex := 2 - Order;
@@ -1430,12 +1976,49 @@ index 8fe4c8b..f2c8421 100644
 +          Shift,
 +          Plane.Bounds.Left - Image.Header.Bounds.Left,
 +          Plane.Bounds.Top - Image.Header.Bounds.Top,
-+          Image.GetContentSize.X,
-+          Image.GetContentSize.Y,
++          Image.GetStoredSize.X,
++          Image.GetStoredSize.Y,
 +          PByte(Image.Data) + Plane.DataOffset,
 +          PlaneModes[PlaneIndex]
 +      );
 +  end;
++end;
++
++// Creates the texture of an image or of a tile of it (Width x Height logical
++// pixels), stored at no more than the image's own stored size.
++function CreateGiTexture(Image: TgiGR; Width, Height: Integer): IDirect3DTexture9;
++begin
++  CtrTextureMinShift := Image.ScaleShift;
++  try
++    if (Image.Header.Format = 0) and (Image.Header.AlphaMask = 0) then
++      Result := GR_CreateTexture(Width, Height, D3DFMT_R5G6B5, D3DPOOL_MANAGED)
++    else
++      Result := GR_CreateTexture(Width, Height, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED);
++  finally
++    CtrTextureMinShift := 0;
++  end;
++end;
++
++// Fills the texture of a whole image when it is stored downscaled, because
++// the image is above the GPU limit or was downscaled by the asset converter.
++// Returns False for an ordinary texture, which is filled through LockRect.
++function FillScaledGiTexture(Texture: IDirect3DTexture9; Image: TgiGR): Boolean;
++var
++  Shift, Pitch: Integer;
++  Bits: Pointer;
++begin
++  Result := False;
++  if not CtrBeginScaledTextureFill(Texture, Shift, Bits, Pitch) then
++    Exit;
++  Dec(Shift, Image.ScaleShift);
++  if Shift = 0 then
++    Image.DecodeToPixels(Bits, Pitch, Image.GetStoredSize.X, Image.GetStoredSize.Y, True)
++  else if Image.Header.Format = 0 then
++    FillScaledTextureFromRawGi(Image, Bits, Pitch, Shift)
++  else if Image.Header.Format = 2 then
++    FillScaledTextureFromRleGi(Image, Bits, Pitch, Shift)
++  else
++    AppendLogLineThreadSafe('No downscaling decoder for this GI format');
 +  CtrEndScaledTextureFill(Texture);
 +  Result := True;
 +end;
@@ -1444,7 +2027,7 @@ index 8fe4c8b..f2c8421 100644
  procedure TCGiControlEC.QueueLoadIfMissing(PendingLoads: TList);
  var
    Control: TCGiControlEC;
-@@ -107,6 +286,111 @@ begin
+@@ -107,6 +314,120 @@ begin
    inherited Destroy;
  end;
  
@@ -1467,8 +2050,9 @@ index 8fe4c8b..f2c8421 100644
 +// can be afforded on the GPU.
 +function TCGiEC.GetOrCreateTile(TileIndex: Integer): IDirect3DTexture9;
 +var
-+  ImageSize, Size: TPoint;
-+  Columns, Rows, Column, Row, Index: Integer;
++  ImageSize, Size, Origin: TPoint;
++  Columns, Rows, Column, Row, Index, Shift: Integer;
++  Scaled: Boolean;
 +  Locked: TD3DLockedRect;
 +  Now: Cardinal;
 +  Plane: PgiPlaneGR;
@@ -1509,13 +2093,18 @@ index 8fe4c8b..f2c8421 100644
 +        and (SurfaceCache.GetSurface(Index) <> nil) then
 +      SurfaceCache.SetSurface(nil, Index);
 +  Size := TileSizes[TileIndex];
-+  if (Image.Header.Format = 0) and (Image.Header.AlphaMask = 0) then
-+    Result := GR_CreateTexture(Size.X, Size.Y, D3DFMT_R5G6B5, D3DPOOL_MANAGED)
-+  else
-+    Result := GR_CreateTexture(Size.X, Size.Y, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED);
++  Result := CreateGiTexture(Image, Size.X, Size.Y);
 +  if Result = nil then
 +    Exit;
-+  Result.LockRect(0, Locked, nil, 0);
++  // A downscaled image fills its tiles at the stored size: CtrTileSize is a
++  // multiple of every downscale, so tiles start on whole stored pixels.
++  Origin.X := TileOrigins[TileIndex].X shr Image.ScaleShift;
++  Origin.Y := TileOrigins[TileIndex].Y shr Image.ScaleShift;
++  Size.X := (Size.X + (1 shl Image.ScaleShift) - 1) shr Image.ScaleShift;
++  Size.Y := (Size.Y + (1 shl Image.ScaleShift) - 1) shr Image.ScaleShift;
++  Scaled := CtrBeginScaledTextureFill(Result, Shift, Locked.Bits, Locked.Pitch);
++  if not Scaled then
++    Result.LockRect(0, Locked, nil, 0);
 +  if Locked.Bits <> nil then
 +  begin
 +    if Image.Header.Format = 2 then
@@ -1528,8 +2117,8 @@ index 8fe4c8b..f2c8421 100644
 +              Locked.Bits,
 +              Locked.Pitch,
 +              0,
-+              Plane.Bounds.Left - Image.Header.Bounds.Left - TileOrigins[TileIndex].X,
-+              Plane.Bounds.Top - Image.Header.Bounds.Top - TileOrigins[TileIndex].Y,
++              Plane.Bounds.Left - Image.Header.Bounds.Left - Origin.X,
++              Plane.Bounds.Top - Image.Header.Bounds.Top - Origin.Y,
 +              Size.X,
 +              Size.Y,
 +              PByte(Image.Data) + Plane.DataOffset,
@@ -1541,13 +2130,16 @@ index 8fe4c8b..f2c8421 100644
 +      Image.DecodeRawRegion(
 +          Locked.Bits,
 +          Locked.Pitch,
-+          TileOrigins[TileIndex].X,
-+          TileOrigins[TileIndex].Y,
++          Origin.X,
++          Origin.Y,
 +          Size.X,
 +          Size.Y,
 +          True
 +      );
-+    Result.UnlockRect(0);
++    if Scaled then
++      CtrEndScaledTextureFill(Result)
++    else
++      Result.UnlockRect(0);
 +  end;
 +  SurfaceCache.SetSurface(Result, TileIndex);
 +end;
@@ -1556,30 +2148,37 @@ index 8fe4c8b..f2c8421 100644
  function TCGiEC.GetTileOrigin(TileIndex: Integer): TPoint;
  begin
    Result := TileOrigins[TileIndex];
-@@ -127,6 +411,11 @@ var
+@@ -127,6 +448,12 @@ var
  begin
    if SurfaceCache = nil then
      SurfaceCache := CreateTextureCache;
 +{$IFDEF CTR}
-+  if UsesTiledSurfaces or ((Image <> nil) and ((Image.GetContentSize.X > MaxTextureSize.X)
-+      or (Image.GetContentSize.Y > MaxTextureSize.Y))) then
++  if UsesTiledSurfaces or ((Image <> nil)
++      and ((Image.GetContentSize.X shr Image.ScaleShift > MaxTextureSize.X)
++          or (Image.GetContentSize.Y shr Image.ScaleShift > MaxTextureSize.Y))) then
 +    Exit(GetOrCreateTile(SurfaceIndex));
 +{$ENDIF}
    Texture := SurfaceCache.GetSurface(SurfaceIndex);
    if (Texture = nil) and (Image <> nil) and not UsesTiledSurfaces then
    begin
-@@ -198,6 +487,10 @@ begin
+@@ -194,10 +521,16 @@ begin
+     end
+     else
+     begin
++{$IFDEF CTR}
++      Texture := CreateGiTexture(Image, ImageSize.X, ImageSize.Y);
++      if FillScaledGiTexture(Texture, Image) then
++      else
++{$ELSE}
+       if (Image.Header.Format = 0) and (Image.Header.AlphaMask = 0) then
          Texture := GR_CreateTexture(ImageSize.X, ImageSize.Y, D3DFMT_R5G6B5, D3DPOOL_MANAGED)
        else
          Texture := GR_CreateTexture(ImageSize.X, ImageSize.Y, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED);
-+{$IFDEF CTR}
-+      if FillScaledTextureFromRawGi(Texture, Image) or FillScaledTextureFromRleGi(Texture, Image) then
-+      else
 +{$ENDIF}
        if Texture <> nil then
        begin
          Texture.LockRect(0, Locked, nil, 0);
-@@ -216,7 +509,11 @@ end;
+@@ -216,7 +549,11 @@ end;
  procedure TCGiEC.LoadFromConfigBuffer(SourceBuffer: TBufEC; const LoadOption: WideString);
  begin
    ApplyWideScreenLayoutFixups(SourceBuffer, CacheKey);
@@ -1591,7 +2190,80 @@ index 8fe4c8b..f2c8421 100644
    ResidentBytes := Image.DataSize;
  end;
  
-@@ -851,4 +1148,12 @@ begin
+@@ -230,13 +567,30 @@ var
+   HeaderBytes: Pointer;
+   Delta, Remainder, ExtraHeight: Integer;
+   PreserveAlpha: Boolean;
++{$IFDEF CTR}
++  // Set for the fixups that only rescale the image to the screen: an image
++  // downscaled by the asset converter is then rescaled from its stored size
++  // (a full-size copy of an HD background takes 9 MiB).
++  RescaleFromStored, DecodedStored: Boolean;
++{$ENDIF}
+ 
+   procedure RenderGiBufferToGraphBuf(SourceBuffer: TBufEC; DestGraphBuf: TGraphBufGR);
+   begin
+     WorkingImage := TgiGR.Create;
+     WorkingImage.LoadRawGiFromBuffer(SourceBuffer);
+-    DestGraphBuf.AllocateRgbaTight(WorkingImage.GetContentSize.X, WorkingImage.GetContentSize.Y);
+-    WorkingImage.DecodeToGraphBuf(DestGraphBuf, False);
++{$IFDEF CTR}
++    DecodedStored := RescaleFromStored and (WorkingImage.ScaleShift > 0);
++    if DecodedStored then
++    begin
++      DestGraphBuf.AllocateRgbaTight(WorkingImage.GetStoredSize.X, WorkingImage.GetStoredSize.Y);
++      WorkingImage.DecodeStoredToGraphBuf(DestGraphBuf, False);
++    end
++    else
++{$ENDIF}
++    begin
++      DestGraphBuf.AllocateRgbaTight(WorkingImage.GetContentSize.X, WorkingImage.GetContentSize.Y);
++      WorkingImage.DecodeToGraphBuf(DestGraphBuf, False);
++    end;
+     WorkingImage.ClearData;
+     WorkingImage.Free;
+   end;
+@@ -285,6 +639,10 @@ begin
+   if ExtraHeight < 0 then
+     ExtraHeight := 0;
+   Quiet := False;
++{$IFDEF CTR}
++  RescaleFromStored := False;
++  DecodedStored := False;
++{$ENDIF}
+   if (ExtraScreenWidth > 0) and (ResourceKey = 'Bm.PanelMain2.' + GiResourceSuffix + 'BG') then
+   begin
+     LogWideScreenGiRescaleStart;
+@@ -768,6 +1126,9 @@ begin
+   begin
+     LogWideScreenGiRescaleStart;
+     SourceGraph := TGraphBufGR.Create(False);
++{$IFDEF CTR}
++    RescaleFromStored := True;
++{$ENDIF}
+     RenderGiBufferToGraphBuf(SourceBuffer, SourceGraph);
+     SourceGraph.RescaleRgbaLinear(GameScreenWidth, GameScreenHeight, True, 1, 1);
+     StoreGraphBufAsGiBuffer(SourceBuffer, SourceGraph, Classes.Point(0, 0));
+@@ -834,10 +1195,18 @@ begin
+     until True;
+     LogWideScreenGiRescaleStart;
+     SourceGraph := TGraphBufGR.Create(False);
++{$IFDEF CTR}
++    RescaleFromStored := True;
++{$ENDIF}
+     RenderGiBufferToGraphBuf(SourceBuffer, SourceGraph);
+     Delta := SourceGraph.Width;
+     Remainder := SourceGraph.Height;
+     SourceGraph.RescaleRgbaLinear(GameScreenWidth, GameScreenHeight, True, 1, VerticalAlign);
++{$IFDEF CTR}
++    // Pixels decoded at the stored size always replace the image.
++    if DecodedStored then
++      Delta := -1;
++{$ENDIF}
+     if (Delta <> SourceGraph.Width) or (Remainder <> SourceGraph.Height) then
+     begin
+       if PreserveAlpha then
+@@ -851,4 +1220,12 @@ begin
    end;
  end;
  
@@ -1693,7 +2365,7 @@ index 744992e..52b6c87 100644
  var
    Entry: TDataElEC;
 diff --git a/source/resources/EC_HsFile.pas b/source/resources/EC_HsFile.pas
-index 7cde8eb..26589b1 100644
+index 7cde8eb..1fc90bc 100644
 --- a/source/resources/EC_HsFile.pas
 +++ b/source/resources/EC_HsFile.pas
 @@ -5,6 +5,9 @@ unit EC_HsFile;
@@ -1750,7 +2422,19 @@ index 7cde8eb..26589b1 100644
  end;
  
  procedure TPackFileEC.SetPackagePath(NewPackagePath: AnsiString);
-@@ -390,6 +409,9 @@ function TPackFileEC.Close: Boolean;
+@@ -353,7 +372,11 @@ begin
+     Exit;
+   end;
+ 
++{$IFDEF CTR}
++  PackageHandle := FileOpen(CtrPackagePath(PackagePath), fmOpenReadWrite or fmShareDenyNone);
++{$ELSE}
+   PackageHandle := FileOpen(NativeGamePath(PackagePath), fmOpenReadWrite or fmShareDenyNone);
++{$ENDIF}
+   if PackageHandle = THandle(-1) then
+   begin
+     raise Exception.Create('Error openning package file [READ]:' + PackagePath);
+@@ -390,6 +413,9 @@ function TPackFileEC.Close: Boolean;
  var
    Success: Boolean;
  begin
@@ -1760,7 +2444,7 @@ index 7cde8eb..26589b1 100644
    Result := False;
    if (PackageHandle = THandle(-1)) and (RootFolder = nil) then
      Exit;
-@@ -412,6 +434,9 @@ function TPackFileEC.CloseForDestroy: Boolean;
+@@ -412,6 +438,9 @@ function TPackFileEC.CloseForDestroy: Boolean;
  var
    Success: Boolean;
  begin
@@ -1770,7 +2454,7 @@ index 7cde8eb..26589b1 100644
    Result := False;
    if (PackageHandle = THandle(-1)) and (RootFolder = nil) then
      Exit;
-@@ -601,6 +626,84 @@ begin
+@@ -601,6 +630,84 @@ begin
    Result := StoredSize;
  end;
  
@@ -1855,7 +2539,7 @@ index 7cde8eb..26589b1 100644
  function TPackFileEC.ReadEntrySlot(
      SlotIndex: Cardinal;
      Buffer: Pointer;
-@@ -636,8 +739,12 @@ begin
+@@ -636,8 +743,12 @@ begin
          ChunkSize := PackCompressionBlockSize - BlockOffset;
        if OpenSlots[SlotIndex].CurrentBlockIndex <> Integer(BlockIndex) then
        begin

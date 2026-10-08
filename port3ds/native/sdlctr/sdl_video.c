@@ -494,12 +494,33 @@ int SDL_RenderSetLogicalSize(SDL_Renderer *r, int w, int h)
 
 /* ------------------------------------------------------------ textures */
 
+static SDL_Texture *create_texture(uint32_t format, int access, int w, int h, int min_shift);
+
 SDL_Texture *SDL_CreateTexture(SDL_Renderer *r, uint32_t format, int access, int w, int h)
+{
+	(void)r;
+	return create_texture(format, access, w, h, 0);
+}
+
+/* Port extension: a static texture stored at no more than 1 / (1 << shift)
+   of its size, for images the asset converter already downscaled. The game
+   fills it with SDL_CTR_UpdateTextureStored. */
+SDL_Texture *SDL_CTR_CreateTextureShifted(SDL_Renderer *r, uint32_t format, int access,
+                                          int w, int h, int shift)
+{
+	(void)r;
+	if (shift < 0 || shift > 4 || (shift && access == SDL_TEXTUREACCESS_TARGET)) {
+		sdlctr_set_error("invalid texture shift %d", shift);
+		return NULL;
+	}
+	return create_texture(format, access, w, h, shift);
+}
+
+static SDL_Texture *create_texture(uint32_t format, int access, int w, int h, int min_shift)
 {
 	SDL_Texture *t;
 	GPU_TEXCOLOR gpufmt;
 	int ok;
-	(void)r;
 	if (format != SDL_PIXELFORMAT_ARGB8888 && format != SDL_PIXELFORMAT_XRGB8888 &&
 	    format != SDL_PIXELFORMAT_RGB565) {
 		sdlctr_set_error("unsupported texture format %x", (unsigned)format);
@@ -512,6 +533,7 @@ SDL_Texture *SDL_CreateTexture(SDL_Renderer *r, uint32_t format, int access, int
 	t->access = access;
 	t->w = w;
 	t->h = h;
+	t->shift = min_shift;
 	while ((w >> t->shift) > MAX_TEX_SIZE || (h >> t->shift) > MAX_TEX_SIZE) t->shift++;
 	if (t->shift && access == SDL_TEXTUREACCESS_TARGET) {
 		free(t);

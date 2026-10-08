@@ -347,6 +347,56 @@ static void scan_input(void)
 	}
 }
 
+/* Test aid: input_script.txt in the game folder plays scripted input, one
+   action per line: "<seconds since start> click|rclick|move <x> <y>" in game
+   coordinates, or "<seconds> key <SDL scancode>". */
+#define SCRIPT_MAX 256
+static struct { uint32_t ms; char what; int a, b; } script[SCRIPT_MAX];
+static int script_count, script_next, script_loaded, script_release;
+static uint32_t script_start;
+
+static void run_script(void)
+{
+	uint32_t now = sdlctr_ticks();
+	if (!script_loaded) {
+		FILE *f = fopen("sdmc:/3ds/SpaceRangersHD/input_script.txt", "r");
+		char line[128], what[16];
+		float sec;
+		script_loaded = 1;
+		script_start = now;
+		if (!f) return;
+		while (script_count < SCRIPT_MAX && fgets(line, sizeof line, f)) {
+			int a = 0, b = 0;
+			if (sscanf(line, "%f %15s %d %d", &sec, what, &a, &b) < 3) continue;
+			script[script_count].ms = (uint32_t)(sec * 1000);
+			script[script_count].what = what[0] == 'r' ? 'r' : what[0];
+			script[script_count].a = a;
+			script[script_count].b = b;
+			script_count++;
+		}
+		fclose(f);
+	}
+	if (script_release) {
+		push_button(script_release, 0);
+		script_release = 0;
+		return;
+	}
+	while (script_next < script_count && now - script_start >= script[script_next].ms) {
+		int i = script_next++;
+		if (script[i].what == 'k') {
+			push_key(script[i].a, 1);
+			push_key(script[i].a, 0);
+			continue;
+		}
+		push_motion(script[i].a, script[i].b);
+		if (script[i].what == 'c' || script[i].what == 'r') {
+			script_release = script[i].what == 'c' ? SDL_BUTTON_LEFT : SDL_BUTTON_RIGHT;
+			push_button(script_release, 1);
+			return;
+		}
+	}
+}
+
 void sdlctr_pump_events(void)
 {
 	uint32_t now = sdlctr_ticks();
@@ -364,6 +414,7 @@ void sdlctr_pump_events(void)
 		return;
 	}
 	scan_input();
+	run_script();
 }
 
 /* Called by the renderer after a frame has been presented, when no GPU

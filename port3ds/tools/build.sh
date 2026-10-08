@@ -3,7 +3,10 @@
 #
 #   port3ds/tools/build.sh [step...]
 #
-# Steps (default: all): compiler rtl native game rtltest
+# Steps (default: all but assetconv): compiler rtl native game rtltest assetconv
+#
+# assetconv builds the host tool that downscales the game data for the 3DS
+# (see convert-data.sh); it needs a host C compiler and zlib.
 #
 # Requirements:
 #   - devkitARM + libctru + 3ds portlibs (DEVKITPRO, default /opt/devkitpro;
@@ -109,6 +112,16 @@ step_rtltest() {
     { grep -E "Error|Fatal" "$WORK/rtltest.log"; exit 1; }
   3dsxtool "$WORK/rtltest/rtltest.elf" "$WORK/rtltest/rtltest.3dsx"
   log "Built $WORK/rtltest/rtltest.3dsx"
+}
+
+step_assetconv() {
+  log "Building the asset converter (host)"
+  checkout "$OKGF_REPO" "$OKGF_REV" "$OKGF_SRC"
+  mkdir -p "$WORK/assetconv"
+  ${CC:-cc} -O2 -Wall -I"$OKGF_SRC/include" -o "$WORK/assetconv/assetconv" \
+    "$HERE/tools/assetconv/assetconv.c" \
+    "$OKGF_SRC"/src/{rle,delta,indexed,pixels,alpha_buffers}.c -lz -lpthread
+  log "Built $WORK/assetconv/assetconv"
 }
 
 steps=("$@")
