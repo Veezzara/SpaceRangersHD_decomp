@@ -526,6 +526,12 @@ SDL_Texture *SDL_CreateTexture(SDL_Renderer *r, uint32_t format, int access, int
 	   screen) use 16-bit color, like the game's own software renderer */
 	if (access == SDL_TEXTUREACCESS_TARGET && (size_t)t->tw * t->th * 4 > 2 * 1024 * 1024)
 		gpufmt = GPU_RGB565;
+	/* Textures destroyed this frame still hold their memory until the GPU is
+	   done with them; finish the frame and free them before giving up. */
+	if (dead_list && linearSpaceFree() < (u32)t->tw * t->th * 4 + 64 * 1024) {
+		if (in_frame) gpu_sync();
+		else collect_dead();
+	}
 	SDL_LockMutex(video_lock);
 	if (access == SDL_TEXTUREACCESS_TARGET) {
 		ok = C3D_TexInitVRAM(&t->tex, t->tw, t->th, gpufmt);
@@ -799,6 +805,45 @@ int SDL_RenderGeometry(SDL_Renderer *r, SDL_Texture *t, const SDL_Vertex *vertic
 }
 
 /* ------------------------------------------------------------ readback */
+
+static inline u32 texel_argb(const SDL_Texture *t, u32 x, u32 y)
+{
+	if (t->tex.fmt == GPU_RGB565) {
+		u16 p = ((const u16 *)t->tex.data)[tile_offset(x, y, t->tw, t->th)];
+		u32 r5 = (p >> 11) & 31, g6 = (p >> 5) & 63, b5 = p & 31;
+		return 0xFF000000u | (((r5 << 3) | (r5 >> 2)) << 16) | (((g6 << 2) | (g6 >> 4)) << 8) |
+		       ((b5 << 3) | (b5 >> 2));
+	}
+	return rgba_to_argb(((const u32 *)t->tex.data)[tile_offset(x, y, t->tw, t->th)]);
+}
+
+/* Port extension: read a static texture back at its SDL size. The texture
+   lives in linear memory, so this lets the game drop its CPU-side copy after
+   uploading; a downscaled texture comes back upscaled (nearest). */
+int SDL_CTR_ReadTexture(SDL_Texture *t, uint32_t format, void *pixels, int pitch)
+{
+	int x, y;
+	if (!t) return sdlctr_set_error("invalid texture");
+	if (t->target) return sdlctr_set_error("use SDL_RenderReadPixels for render targets");
+	for (y = 0; y < t->h; y++) {
+		uint8_t *row = (uint8_t *)pixels + (size_t)y * pitch;
+		u32 sy = (u32)y >> t->shift;
+		if (sy >= (u32)t->sh) sy = t->sh - 1;
+		for (x = 0; x < t->w; x++) {
+			u32 sx = (u32)x >> t->shift;
+			u32 argb;
+			if (sx >= (u32)t->sw) sx = t->sw - 1;
+			argb = texel_argb(t, sx, sy);
+			if (format == SDL_PIXELFORMAT_RGB565)
+				((u16 *)row)[x] = (u16)(((argb >> 8) & 0xF800) | ((argb >> 5) & 0x07E0) | ((argb >> 3) & 0x001F));
+			else if (format == SDL_PIXELFORMAT_XRGB8888)
+				((u32 *)row)[x] = argb | 0xFF000000u;
+			else
+				((u32 *)row)[x] = argb;
+		}
+	}
+	return 0;
+}
 
 int SDL_RenderReadPixels(SDL_Renderer *r, const SDL_Rect *rect, uint32_t format, void *pixels, int pitch)
 {

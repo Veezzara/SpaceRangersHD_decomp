@@ -74,6 +74,14 @@ procedure CtrLogMemory(const Context: AnsiString);
 // Appends a line to sdmc:/3ds/SpaceRangersHD/ctr.log and the debug output.
 procedure CtrLog(const Msg: AnsiString);
 function CtrRomfsMounted: Boolean;
+// Heap capacity not yet handed out by malloc, and free linear (GPU) memory.
+function CtrFreeHeapBytes: LongWord;
+function CtrFreeLinearBytes: LongWord;
+
+var
+  // CPU-side pixel copies kept by the renderer for its textures (bytes, count).
+  CtrTexturePixelBytes: LongInt = 0;
+  CtrTextureCount: LongInt = 0;
 
 implementation
 
@@ -100,6 +108,7 @@ var
 
 procedure fpcctr_meminfo(Info: PLongWord); cdecl; external;
 function fpcctr_file_stats(Stats: PLongInt): PAnsiChar; cdecl; external;
+procedure fpcctr_os_alloc_stats(Stats: PLongWord); cdecl; external;
 
 procedure CtrLogFiles(const Context: AnsiString);
 var
@@ -114,14 +123,36 @@ begin
     CtrLog(Format('%s last failed open: errno %d, %s', [Context, Stats[9], AnsiString(LastPath)]));
 end;
 
-procedure CtrLogMemory(const Context: AnsiString);
+function CtrFreeHeapBytes: LongWord;
 var
   Info: array[0..6] of LongWord;
 begin
   fpcctr_meminfo(@Info[0]);
-  CtrLog(Format('%s: heap %d KiB used, arena %d KiB, capacity %d KiB; linear %d KiB, VRAM %d KiB; app region %d KiB; stack %d KiB',
-    [Context, Info[1] div 1024, Info[0] div 1024, Info[2] div 1024, Info[3] div 1024,
-     Info[4] div 1024, Info[5] div 1024, Info[6] div 1024]));
+  if Info[2] > Info[1] then
+    Result := Info[2] - Info[1]
+  else
+    Result := 0;
+end;
+
+function CtrFreeLinearBytes: LongWord;
+var
+  Info: array[0..6] of LongWord;
+begin
+  fpcctr_meminfo(@Info[0]);
+  Result := Info[3];
+end;
+
+procedure CtrLogMemory(const Context: AnsiString);
+var
+  Info: array[0..6] of LongWord;
+  Alloc: array[0..2] of LongWord;
+begin
+  fpcctr_meminfo(@Info[0]);
+  fpcctr_os_alloc_stats(@Alloc[0]);
+  CtrLog(Format('%s: heap %d KiB used, arena %d KiB, capacity %d KiB; linear %d KiB free (%d KiB heap spill), ' +
+    'VRAM %d KiB; app region %d KiB; stack %d KiB; failed allocations %d (last %d KiB)',
+    [Context, Info[1] div 1024, Info[0] div 1024, Info[2] div 1024, Info[3] div 1024, Alloc[0] div 1024,
+     Info[4] div 1024, Info[5] div 1024, Info[6] div 1024, Alloc[1], Alloc[2] div 1024]));
 end;
 
 // Logs memory every two seconds, so that a run that ends abruptly still
@@ -139,6 +170,8 @@ begin
     begin
       CtrLogMemory(Format('t=%ds', [(GetTickCount64 - StartTicks) div 1000]));
       CtrLogFiles(Format('t=%ds', [(GetTickCount64 - StartTicks) div 1000]));
+      CtrLog(Format('t=%ds textures: %d, CPU copies %d KiB',
+        [(GetTickCount64 - StartTicks) div 1000, CtrTextureCount, CtrTexturePixelBytes div 1024]));
     end;
   end;
   Result := 0;

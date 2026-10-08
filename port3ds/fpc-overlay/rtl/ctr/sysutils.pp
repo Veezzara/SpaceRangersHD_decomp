@@ -84,6 +84,7 @@ function ctr_fstat(fd: LongInt; info: PCtrStatInfo): LongInt; cdecl; external na
 function ctr_opendir(path: PAnsiChar): Pointer; cdecl; external name 'fpcctr_opendir';
 function ctr_closedir(dir: Pointer): LongInt; cdecl; external name 'fpcctr_closedir';
 function ctr_readdir(dir: Pointer): PAnsiChar; cdecl; external name 'fpcctr_readdir';
+function ctr_readdir_info(dir: Pointer; info: PCtrStatInfo): PAnsiChar; cdecl; external name 'fpcctr_readdir_info';
 function ctr_ticks_ms: QWord; cdecl; external name 'fpcctr_ticks_ms';
 procedure ctr_sleep_ns(ns: Int64); cdecl; external name 'fpcctr_sleep_ns';
 procedure ctr_localtime(fields: PLongInt); cdecl; external name 'fpcctr_localtime';
@@ -323,14 +324,11 @@ begin
   Result:=p>Length(Pattern);
 end;
 
-function CtrFillSearchRec(const FullName, Name: RawByteString; SearchAttr: LongInt; var Rslt: TAbstractSearchRec): Boolean;
+function CtrFillSearchRecInfo(const info: TCtrStatInfo; const Name: RawByteString; SearchAttr: LongInt; var Rslt: TAbstractSearchRec): Boolean;
 var
-  info: TCtrStatInfo;
   attr: LongInt;
 begin
   Result:=False;
-  if ctr_stat(PAnsiChar(FullName),@info)<>0 then
-    exit;
   attr:=InfoToAttr(info,Name);
   { the generic code passes the requested attributes; exclude entries with
     special attributes that were not asked for }
@@ -338,8 +336,19 @@ begin
     exit;
   Rslt.Attr:=attr;
   Rslt.Size:=info.size;
-  Rslt.Time:=UnixToFileDate(info.mtime);
+  if info.mtime<>0 then
+    Rslt.Time:=UnixToFileDate(info.mtime)
+  else
+    Rslt.Time:=0;
   Result:=True;
+end;
+
+function CtrFillSearchRec(const FullName, Name: RawByteString; SearchAttr: LongInt; var Rslt: TAbstractSearchRec): Boolean;
+var
+  info: TCtrStatInfo;
+begin
+  Result:=(ctr_stat(PAnsiChar(FullName),@info)=0) and
+    CtrFillSearchRecInfo(info,Name,SearchAttr,Rslt);
 end;
 
 function InternalFindNext(var Rslt: TAbstractSearchRec; var Name: RawByteString): LongInt;
@@ -347,18 +356,20 @@ var
   data: PCtrFindData;
   entry: PAnsiChar;
   entryName: RawByteString;
+  info: TCtrStatInfo;
 begin
   Result:=-1;
   data:=PCtrFindData(Rslt.FindHandle);
   if (data=nil) or (data^.Dir=nil) then
     exit;
   repeat
-    entry:=ctr_readdir(data^.Dir);
+    { the entry carries its type and size; a stat per entry is very slow }
+    entry:=ctr_readdir_info(data^.Dir,@info);
     if entry=nil then
       exit;
     entryName:=entry;
     if CtrMatch(data^.Mask,entryName) and
-       CtrFillSearchRec(data^.DirName+entryName,entryName,data^.SearchAttr,Rslt) then
+       CtrFillSearchRecInfo(info,entryName,data^.SearchAttr,Rslt) then
       begin
         Name:=entryName;
         SetCodePage(Name,DefaultFileSystemCodePage,false);

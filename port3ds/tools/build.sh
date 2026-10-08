@@ -69,6 +69,8 @@ step_compiler() {
 
 step_rtl() {
   log "Building the 3DS RTL"
+  # Refresh the overlay so RTL edits do not need a compiler rebuild.
+  cp -r "$HERE/fpc-overlay/rtl/." "$FPC_SRC/rtl/"
   rm -rf "$RTL_OUT"
   "$HERE/tools/buildrtl.sh" "$FPC_SRC" "$RTL_OUT" > "$WORK/rtl.log" 2>&1 ||
     { grep -E "Error|Fatal" "$WORK/rtl.log" | head -30; exit 1; }

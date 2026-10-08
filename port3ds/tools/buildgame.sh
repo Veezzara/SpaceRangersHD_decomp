@@ -6,6 +6,9 @@ FPC_SRC=$(realpath "$1"); RTL=$(realpath "$2"); GAME=$(realpath "$3"); OUT=$(rea
 HERE=$(dirname "$(realpath "$0")")/..
 : "${DEVKITPRO:=/opt/devkitpro}"
 PPC="$FPC_SRC/compiler/ppcarm"
+# Stale units across the game's circular unit references can produce bogus
+# type errors after a patch changes an interface; always build from scratch.
+rm -rf "$OUT/units"
 mkdir -p "$OUT/units"
 DIRS=()
 for d in $(find "$GAME/source" -type d | sort); do DIRS+=("-Fu$d"); done

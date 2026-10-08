@@ -108,6 +108,9 @@ begin
   EndThread(DWord(res));
 end;
 
+const
+  CtrMaxThreadStackSize = 1024*1024;
+
 function CtrBeginThread(sa: Pointer; stacksize: PtrUInt;
                         ThreadFunction: TThreadFunc; p: Pointer;
                         creationFlags: DWord; var ThreadId: TThreadID): TThreadID;
@@ -122,8 +125,11 @@ begin
   FillChar(rec^,sizeof(rec^),0);
   rec^.Func:=ThreadFunction;
   rec^.Param:=p;
-  if stacksize=0 then
-    stacksize:=DefaultStackSize;
+  { TThread asks for DefaultStackSize (4 MB). Thread stacks come out of the
+    same heap as everything else here, so use the 1 MB a Windows thread gets
+    by default, which is what the game was written against. }
+  if (stacksize=0) or (stacksize>CtrMaxThreadStackSize) then
+    stacksize:=CtrMaxThreadStackSize;
   rec^.StackLen:=stacksize;
   rec^.Started:=ctr_alloc_event(1,0);
   { core -100: the RTL default core (see fpcctr_set_default_core) }

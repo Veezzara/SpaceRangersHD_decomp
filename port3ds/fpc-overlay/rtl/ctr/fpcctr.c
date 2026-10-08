@@ -23,6 +23,7 @@
 #include <dirent.h>
 #include <time.h>
 #include <sys/stat.h>
+#include <sys/iosupport.h>
 #include <sys/time.h>
 #include <malloc.h>
 
@@ -53,6 +54,58 @@ void fpcctr_meminfo(u32 *out)
 	out[4] = vramSpaceFree();
 	out[5] = osGetMemRegionSize(MEMREGION_APPLICATION);
 	out[6] = __stacksize__;
+}
+
+/* OS-level blocks for the Pascal heap manager. The application heap is
+   only about 87 MiB and gets fragmented by the game's multi-MiB buffers,
+   while the linear (GPU) heap usually has room to spare. When malloc
+   fails, fall back to linear memory as long as enough of it stays free for
+   textures and the GPU command and vertex buffers. */
+#define LINEAR_RESERVE (10u * 1024 * 1024)
+extern u32 __ctru_linear_heap, __ctru_linear_heap_size;
+static u32 linear_fallback_bytes, os_alloc_failures, os_alloc_last_failed;
+void fpcctr_trace(const char *what, const char *path, u32 size);
+
+static int is_linear(const void *p)
+{
+	u32 a = (u32)p;
+	return a >= __ctru_linear_heap && a < __ctru_linear_heap + __ctru_linear_heap_size;
+}
+
+void *fpcctr_os_alloc(size_t size)
+{
+	void *p = malloc(size);
+	if (!p && linearSpaceFree() >= size + LINEAR_RESERVE) {
+		p = linearAlloc(size);
+		if (p) linear_fallback_bytes += size;
+	}
+	if (!p) {
+		os_alloc_failures++;
+		os_alloc_last_failed = size;
+	}
+	if (size >= 1024 * 1024)
+		fpcctr_trace(!p ? "allocfail" : is_linear(p) ? "alloclin" : "alloc", NULL, size);
+	return p;
+}
+
+void fpcctr_os_free(void *p, size_t size)
+{
+	if (!p) return;
+	if (size >= 1024 * 1024) fpcctr_trace("free", NULL, size);
+	if (is_linear(p)) {
+		linear_fallback_bytes -= size;
+		linearFree(p);
+	} else
+		free(p);
+}
+
+/* [0] bytes spilled to linear memory, [1] failed allocations, [2] size of
+   the last failed one. */
+void fpcctr_os_alloc_stats(u32 *out)
+{
+	out[0] = linear_fallback_bytes;
+	out[1] = os_alloc_failures;
+	out[2] = os_alloc_last_failed;
 }
 
 /* ---------------------------------------------------------------- errno */
@@ -174,9 +227,36 @@ static int real_fd(int vfd)
 	return fd;
 }
 
+/* Bumped whenever a directory entry may have appeared, gone or been renamed,
+   so callers can cache directory listings (each FS call is an IPC round trip). */
+static volatile unsigned int fs_generation;
+
+unsigned int fpcctr_fs_generation(void) { return fs_generation; }
+
+/* Debug aid: when trace_open.txt exists next to the game data, every open is
+   appended to open.log together with the heap in use. */
+void fpcctr_trace(const char *what, const char *path, u32 size)
+{
+	static int state; /* 0 unknown, 1 off, 2 on */
+	static FILE *log;
+	struct stat st;
+	if (state == 1) return;
+	if (state == 0) {
+		state = 1;
+		if (stat("sdmc:/3ds/SpaceRangersHD/trace_open.txt", &st) == 0 &&
+		    (log = fopen("sdmc:/3ds/SpaceRangersHD/open.log", "w")) != NULL)
+			state = 2;
+		if (state == 1) return;
+	}
+	fprintf(log, "%lu %u %s %u %s\n", (unsigned long)(svcGetSystemTick() / (SYSCLOCK_ARM11 / 1000ULL)),
+		(unsigned)(mallinfo().uordblks / 1024), what, (unsigned)(size / 1024), path ? path : "-");
+	fflush(log);
+}
+
 int fpcctr_open(const char *path, int flags, int mode)
 {
-	int f, fd, i, err;
+	int f, fd, i, err, created = 0;
+	struct stat st;
 	switch (flags & 3) {
 	case 0: f = O_RDONLY; break;
 	case 1: f = O_WRONLY; break;
@@ -186,6 +266,7 @@ int fpcctr_open(const char *path, int flags, int mode)
 	if (flags & FPCCTR_O_TRUNC) f |= O_TRUNC;
 	if (flags & FPCCTR_O_APPEND) f |= O_APPEND;
 	if (flags & FPCCTR_O_EXCL) f |= O_EXCL;
+	if ((f & O_CREAT) && stat(path, &st) != 0) created = 1;
 	LightLock_Lock(&vfile_lock);
 	for (i = 0; i < MAX_VFD && vfiles[i].path; i++)
 		;
@@ -206,6 +287,8 @@ int fpcctr_open(const char *path, int flags, int mode)
 		errno = err;
 		return -1;
 	}
+	if (created) fs_generation++;
+	fpcctr_trace("open", path, 0);
 	vfiles[i].path = strdup(path);
 	vfiles[i].flags = f;
 	vfiles[i].mode = mode;
@@ -303,10 +386,11 @@ const char *fpcctr_file_stats(int *out)
 }
 
 int fpcctr_isatty(int fd) { return fd < VFD_BASE ? isatty(fd) : 0; }
-int fpcctr_unlink(const char *path) { return unlink(path); }
-int fpcctr_rename(const char *from, const char *to) { return rename(from, to); }
-int fpcctr_mkdir(const char *path) { return mkdir(path, 0777); }
-int fpcctr_rmdir(const char *path) { return rmdir(path); }
+static int bump(int r) { fs_generation++; return r; }
+int fpcctr_unlink(const char *path) { return bump(unlink(path)); }
+int fpcctr_rename(const char *from, const char *to) { return bump(rename(from, to)); }
+int fpcctr_mkdir(const char *path) { return bump(mkdir(path, 0777)); }
+int fpcctr_rmdir(const char *path) { return bump(rmdir(path)); }
 int fpcctr_chdir(const char *path) { return chdir(path); }
 
 int fpcctr_getcwd(char *buf, int size)
@@ -362,6 +446,28 @@ const char *fpcctr_readdir(void *dir)
 {
 	struct dirent *e = readdir((DIR *)dir);
 	return e ? e->d_name : NULL;
+}
+
+/* Directory entry plus its type and size. The SD archive reports both with
+   the entry itself, so this avoids a stat() per entry: on the 3DS each stat
+   opens and closes the file through the FS service, which made scanning a
+   data folder take seconds. The modification time is not available here. */
+const char *fpcctr_readdir_info(void *dir, fpcctr_statinfo *info)
+{
+	DIR *d = (DIR *)dir;
+	struct stat st;
+	const devoptab_t *dev;
+	memset(info, 0, sizeof(*info));
+	if (!d || !d->dirData) return NULL;
+	dev = devoptab_list[d->dirData->device];
+	if (!dev || !dev->dirnext_r) return NULL;
+	memset(&st, 0, sizeof(st));
+	if (dev->dirnext_r(_REENT, d->dirData, d->fileData.d_name, &st) != 0)
+		return NULL;
+	d->position++;
+	fill_stat(&st, info);
+	info->readonly = 0;
+	return d->fileData.d_name;
 }
 
 /* ---------------------------------------------------------------- time */

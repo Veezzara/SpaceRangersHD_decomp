@@ -106,9 +106,20 @@ emulator on a virtual display. The RTL self-test passes there.
 - [x] All game units compile for the 3DS
 - [x] Platform layer: SDL2 subset on citro3d, ndsp and hid; the video
       self-test passes in the emulator
-- [x] Linked `Rangers.3dsx`; in the emulator it starts and stops at the
-      first data file
-- [ ] Run with game data; measure speed and memory on a New 3DS
+- [x] Linked `Rangers.3dsx`; with the game data it reaches the main menu in
+      the emulator (Azahar, New 3DS mode) after about 2.5 minutes
+- [ ] Converted resources: the HD animations are read whole and do not fit
+      the ~87 MiB heap. Entries above 16 MiB (the main menu ships, 47-62 MiB
+      each) are skipped for now, and the 2048x1536 menu background barely
+      fits.
+- [ ] Measure speed and memory on a New 3DS
+
+Memory notes: the platform layer reports the real free memory as the
+texture budget, drops the CPU copy of a texture after uploading it (the GPU
+copy is read back if the game locks it again), lets the Pascal heap spill
+into spare linear memory, and caps worker thread stacks at 1 MiB. Creating
+`trace_open.txt` next to the game data logs every file open and every heap
+block of 1 MiB or more to `open.log`.
 - [ ] Interface legibility on the small screens (layout work)
 
 Game data is not included; it comes from an installed copy of the game.

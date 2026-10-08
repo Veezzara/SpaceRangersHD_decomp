@@ -20,7 +20,8 @@ const
     CtrDataDir + '/'#10 +
     'on the SD card, so that ' + CtrDataDir + '/install.txt exists.';
 begin
-  if FileExists(CtrDataDir + '/install.txt') or FileExists(CtrDataDir + '/Install.txt') then
+  if FileExists(CtrDataDir + '/install.txt') or FileExists(CtrDataDir + '/Install.txt') or
+     FileExists(CtrDataDir + '/INSTALL.TXT') then
     Exit;
   CtrLog('game data missing');
   SDL_InitSubSystem(SDL_INIT_VIDEO);
