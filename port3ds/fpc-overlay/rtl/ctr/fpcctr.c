@@ -78,7 +78,9 @@ void fpcctr_set_errno(int e) { errno = e; }
  * closed when needed and transparently reopened at the same position. */
 #define VFD_BASE 1000
 #define MAX_VFD 1024
-#define MAX_REAL 24
+/* The FS service fails at about 22 open files (0xD860466C), and logs and
+   libraries need some too. */
+#define MAX_REAL 8
 
 typedef struct {
 	char *path;
@@ -118,6 +120,12 @@ static int real_open(const char *path, int flags, int mode)
 	return fd;
 }
 
+/* Errors that do not mean "out of file handles". */
+static int is_definite_error(int err)
+{
+	return err == ENOENT || err == ENOTDIR || err == EEXIST || err == EISDIR || err == ENAMETOOLONG;
+}
+
 static int evict_one(void)
 {
 	int i, victim = -1;
@@ -152,7 +160,7 @@ static int real_fd(int vfd)
 	if (v->fd >= 0) return v->fd;
 	if (real_open_count >= MAX_REAL) evict_one();
 	fd = real_open(v->path, v->flags & ~(O_CREAT | O_TRUNC | O_EXCL), v->mode);
-	if (fd < 0 && (errno == EMFILE || errno == ENFILE) && evict_one())
+	while (fd < 0 && !is_definite_error(errno) && evict_one())
 		fd = real_open(v->path, v->flags & ~(O_CREAT | O_TRUNC | O_EXCL), v->mode);
 	if (fd < 0) {
 		fstats.reopen_failures++;
@@ -189,7 +197,7 @@ int fpcctr_open(const char *path, int flags, int mode)
 	}
 	if (real_open_count >= MAX_REAL) evict_one();
 	fd = real_open(path, f, mode);
-	if (fd < 0 && (errno == EMFILE || errno == ENFILE) && evict_one())
+	while (fd < 0 && !is_definite_error(errno) && evict_one())
 		fd = real_open(path, f, mode);
 	if (fd < 0) {
 		err = errno;
