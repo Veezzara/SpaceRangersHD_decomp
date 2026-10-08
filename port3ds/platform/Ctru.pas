@@ -69,6 +69,8 @@ function svcOutputDebugString(str: PAnsiChar; length: LongInt): Result3DS; cdecl
 
 procedure CtrStartup;
 procedure CtrShutdown;
+// Logs heap and system memory use (see fpcctr_meminfo).
+procedure CtrLogMemory(const Context: AnsiString);
 // Appends a line to sdmc:/3ds/SpaceRangersHD/ctr.log and the debug output.
 procedure CtrLog(const Msg: AnsiString);
 function CtrRomfsMounted: Boolean;
@@ -92,6 +94,52 @@ var
   RomfsOk: Boolean;
   LogLock: TRTLCriticalSection;
   LogReady: Boolean;
+  MonitorStop: Boolean;
+  MonitorThread: TThreadID;
+  StartTicks: QWord;
+
+procedure fpcctr_meminfo(Info: PLongWord); cdecl; external;
+
+procedure CtrLogMemory(const Context: AnsiString);
+var
+  Info: array[0..6] of LongWord;
+begin
+  fpcctr_meminfo(@Info[0]);
+  CtrLog(Format('%s: heap %d KiB used, arena %d KiB, capacity %d KiB; linear %d KiB, VRAM %d KiB; app region %d KiB; stack %d KiB',
+    [Context, Info[1] div 1024, Info[0] div 1024, Info[2] div 1024, Info[3] div 1024,
+     Info[4] div 1024, Info[5] div 1024, Info[6] div 1024]));
+end;
+
+// Logs memory every two seconds, so that a run that ends abruptly still
+// shows how far it got and how memory evolved.
+function MemoryMonitor(Parameter: Pointer): PtrInt;
+var
+  Counter: Integer;
+begin
+  Counter := 0;
+  while not MonitorStop do
+  begin
+    Sleep(100);
+    Inc(Counter);
+    if Counter mod 20 = 0 then
+      CtrLogMemory(Format('t=%ds', [(GetTickCount64 - StartTicks) div 1000]));
+  end;
+  Result := 0;
+end;
+
+procedure RedirectStdIO;
+begin
+  // Runtime error reports and the game's own fatal-error output go here.
+  {$I-}
+  AssignFile(Output, CtrDataDir + '/stdout.log');
+  Rewrite(Output);
+  AssignFile(StdErr, CtrDataDir + '/stderr.log');
+  Rewrite(StdErr);
+  ErrOutput := StdErr;
+  {$I+}
+  if IOResult <> 0 then
+    ;
+end;
 
 procedure CtrLog(const Msg: AnsiString);
 var
@@ -147,13 +195,23 @@ begin
   if CtrIsNew3DS then
     CtrSetDefaultThreadCore(2);
   ChDir(CtrDataDir);
+  RedirectStdIO;
+  StartTicks := GetTickCount64;
   CtrLog('Space Rangers HD for 3DS starting; New3DS=' + BoolToStr(CtrIsNew3DS, True) +
     ' romfs=' + BoolToStr(RomfsOk, True) + ' cpus=' + IntToStr(CPUCount));
+  CtrLogMemory('start');
+  MonitorThread := BeginThread(@MemoryMonitor, nil);
 end;
 
 procedure CtrShutdown;
 begin
-  CtrLog('shutdown');
+  MonitorStop := True;
+  CtrLogMemory('exit');
+  CtrLog(Format('shutdown: ExitCode=%d ErrorAddr=%p', [ExitCode, ErrorAddr]));
+  {$I-}
+  Flush(Output);
+  Flush(StdErr);
+  {$I+}
   if RomfsOk then
     romfsUnmount('romfs');
 end;

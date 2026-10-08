@@ -24,6 +24,7 @@
 #include <time.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <malloc.h>
 
 /* Sizes of the opaque Pascal buffers (see sysosh.inc). */
 #define FPCCTR_LOCK_SIZE  16
@@ -31,6 +32,28 @@
 
 _Static_assert(sizeof(RecursiveLock) <= FPCCTR_LOCK_SIZE, "TRTLCriticalSection too small");
 _Static_assert(sizeof(LightEvent) <= FPCCTR_EVENT_SIZE, "event buffer too small");
+
+/* libctru gives the main thread 32 KiB of stack by default. Pascal code
+   (and code translated from Delphi in particular) keeps large records and
+   arrays on the stack; Windows gives 1 MiB. Overflowing the stack silently
+   corrupts the heap, so reserve 2 MiB. */
+u32 __stacksize__ = 2 * 1024 * 1024;
+extern u32 __ctru_heap_size;
+
+/* Memory statistics: [0] heap arena, [1] heap in use, [2] heap capacity
+   (libctru __ctru_heap_size), [3] free linear memory, [4] free VRAM, [5] application region size,
+   [6] main thread stack size. */
+void fpcctr_meminfo(u32 *out)
+{
+	struct mallinfo mi = mallinfo();
+	out[0] = mi.arena;
+	out[1] = mi.uordblks;
+	out[2] = __ctru_heap_size;
+	out[3] = linearSpaceFree();
+	out[4] = vramSpaceFree();
+	out[5] = osGetMemRegionSize(MEMREGION_APPLICATION);
+	out[6] = __stacksize__;
+}
 
 /* ---------------------------------------------------------------- errno */
 
