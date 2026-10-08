@@ -73,6 +73,32 @@ logs are `ctr.log` and `sdl.log` in the data folder. Without data the game
 shows where it expects it. Planetary battles (MatrixGame) and AVI videos are
 not available.
 
+### Downscaled data
+
+The HD images are drawn 1:1 in the game's 1024x768 space, which the 3DS
+shows at 400x240 (or zoomed in), and they do not fit its memory beyond the
+main menu. `tools/convert-data.sh` makes a set of the image packages at half
+size (or a quarter with shift 2):
+
+```sh
+port3ds/tools/convert-data.sh <game>/DATA DATA-half      # shift 1, default
+port3ds/tools/convert-data.sh <game>/DATA DATA-quarter 2
+```
+
+It builds the converter (`tools/assetconv`, needs a host C compiler and
+zlib) on first use and takes about a minute; the half-size set is about
+800 MiB instead of 1.7 GiB. Copy the output folder to
+`sdmc:/3ds/SpaceRangersHD/` and write its name in
+`sdmc:/3ds/SpaceRangersHD/assets.txt` (for example `DATA-half`); packages
+missing from it are read from `DATA`, and deleting `assets.txt` goes back to
+the original data. `ctr.log` lists the packages taken from the set.
+
+Converted images keep their logical size, so layouts and clicks are
+unchanged; the cost is detail when zooming in. Converted: `.gi` images of at
+least 64x64 pixels, `.gai` animations, and playback animations (the menu
+ships, the government officials) with their first image. Not converted:
+`.hai` ship sprites, JPEG/PNG pictures, rotating (format 4) animations.
+
 ## Building
 
 Requirements: devkitARM with libctru and the 3DS portlibs (the
@@ -84,7 +110,8 @@ export DEVKITPRO=/opt/devkitpro
 FPC_BOOTSTRAP=/path/to/ppcx64 port3ds/tools/build.sh
 ```
 
-Steps: `compiler rtl native game rtltest` (default: all). Outputs go to
+Steps: `compiler rtl native game rtltest` (default: all), and `assetconv`
+(the host converter, see Downscaled data). Outputs go to
 `port3ds/.local/`:
 
 - `rtltest/rtltest.3dsx` - RTL self-test; writes `sdmc:/rtltest.log` and ends
@@ -114,9 +141,10 @@ emulator on a virtual display. The RTL self-test passes there.
       are drawn from 512-pixel tiles created when they come into view. The main menu runs with its ship animations and
       background, but slowly (each animation frame is decoded and uploaded
       on the fly) and close to the memory limit.
-- [ ] Converted resources (HD images and animations at half size), which
-      the memory budget needs beyond the main menu. Other entries above
-      16 MiB (the .hai ship sprites) are still skipped.
+- [x] Downscaled data sets (`tools/convert-data.sh`, `assets.txt`); with
+      the half-size set the game reaches the new game screen and the galaxy
+      generation in the emulator. Entries above 16 MiB (the .hai ship
+      sprites) are still skipped.
 - [ ] Measure speed and memory on a New 3DS
 - [ ] Interface legibility on the small screens (layout work)
 
@@ -130,6 +158,8 @@ package layer remembers block offsets so that frames can be read from the
 middle of a compressed entry. Creating `trace_open.txt` next to the game
 data logs every file open and every heap block of 1 MiB or more to
 `open.log`; `frame_dump.txt` makes sdlctr save every 20th game frame, at
-the full 1024x768, as `frameNNN.bmp`.
+the full 1024x768, as `frameNNN.bmp`. `input_script.txt` plays scripted
+input for tests, one action per line: `<seconds> click|rclick|move <x> <y>`
+in game coordinates or `<seconds> key <SDL scancode>`.
 
 Game data is not included; it comes from an installed copy of the game.

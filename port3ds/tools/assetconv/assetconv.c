@@ -17,6 +17,7 @@
  *   GAI header bytes 40..47 = "SC", shift, 0, 0, 0, 0, 0
  *
  * Converted:
+ *   - .hai ship sprites (palette images, mapped back to their palettes);
  *   - .gi images of formats 0, 1, 2 and 3 with at least min-area pixels
  *     (format 0 stays raw, the others become format 2);
  *   - .gai animations whose frames are all of those formats;
@@ -343,7 +344,7 @@ static long opt_min_area = 64 * 64;
 static int opt_level = 6;
 
 typedef struct {
-	long gi_in, gi_done, gai_in, gai_done, pb_in, pb_done;
+	long gi_in, gi_done, gai_in, gai_done, pb_in, pb_done, hai_in, hai_done;
 	uint64_t bytes_in, bytes_out;
 } Stats;
 
@@ -681,6 +682,81 @@ static int convert_gai_playback(const Gai *g, const uint8_t *first, size_t first
 	return ok;
 }
 
+/* ------------------------------------------------------------------- hai */
+
+/* Rotating ship sprites (EC_CacheHSAI): a 52-byte header, then per frame an
+   8-bit index plane and a 256-color RGBA palette. The game draws them on a
+   quad of the size the ship's settings give, so a smaller sprite needs no
+   change in the game. Frames are downscaled in RGBA and mapped back to their
+   palettes. The red mask (unused for palettes) marks converted sprites. */
+#define HAI_HEADER 52
+
+static int nearest_color(const uint8_t *pal, const uint8_t *c, int32_t *cache_key, uint8_t *cache_val)
+{
+	uint32_t key = (uint32_t)c[0] | (uint32_t)c[1] << 8 | (uint32_t)c[2] << 16 | (uint32_t)c[3] << 24;
+	uint32_t h = (key * 2654435761u) >> 20; /* 4096 slots */
+	if (cache_key[h] == (int32_t)key && cache_key[h] != -1) return cache_val[h];
+	long best = -1;
+	int bi = 0;
+	for (int i = 0; i < 256; i++) {
+		const uint8_t *p = pal + 4 * i;
+		long d = 0;
+		/* Compare premultiplied colors and alpha. */
+		for (int k = 0; k < 3; k++) {
+			long e = (long)p[k] * p[3] - (long)c[k] * c[3];
+			d += (e / 255) * (e / 255);
+		}
+		long ea = (long)p[3] - c[3];
+		d += 4 * ea * ea;
+		if (best < 0 || d < best) {
+			best = d;
+			bi = i;
+		}
+	}
+	cache_key[h] = (int32_t)key;
+	cache_val[h] = (uint8_t)bi;
+	return bi;
+}
+
+static int convert_hai(const uint8_t *p, size_t n, Buf *out)
+{
+	if (n < HAI_HEADER) return 0;
+	int w = rds32(p + 4), h = rds32(p + 8), pitch = rds32(p + 12);
+	uint32_t frames = rd32(p + 16), stride = rd32(p + 20), pal = rd32(p + 24), bpp = rd32(p + 28);
+	uint32_t palbytes = rd32(p + 48);
+	if ((rd32(p + 32) & 0xFFFF0000u) == SCALE_MARKER) return 0;
+	if (w <= 0 || h <= 0 || pitch != w || bpp != 8 || pal != 1 || palbytes != 1024) return 0;
+	if (stride != (uint32_t)w * h + 1024 || HAI_HEADER + (uint64_t)frames * stride > n) return 0;
+	if ((long)w * h < opt_min_area) return 0;
+	int f = 1 << opt_shift, sw = (w + f - 1) >> opt_shift, sh = (h + f - 1) >> opt_shift;
+	uint32_t sstride = (uint32_t)sw * sh + 1024;
+	uint8_t *hd = buf_grow(out, HAI_HEADER);
+	memcpy(hd, p, HAI_HEADER);
+	wr32(hd + 4, (uint32_t)sw);
+	wr32(hd + 8, (uint32_t)sh);
+	wr32(hd + 12, (uint32_t)sw);
+	wr32(hd + 20, sstride);
+	wr32(hd + 32, SCALE_MARKER | (uint32_t)opt_shift);
+	Image full, small;
+	int32_t *cache_key = xmalloc(4096 * sizeof(int32_t));
+	uint8_t *cache_val = xmalloc(4096);
+	image_alloc(&full, 0, 0, w, h);
+	for (uint32_t fr = 0; fr < frames; fr++) {
+		const uint8_t *idx = p + HAI_HEADER + (size_t)fr * stride, *palette = idx + (size_t)w * h;
+		for (size_t i = 0; i < (size_t)w * h; i++) memcpy(full.px + 4 * i, palette + 4 * idx[i], 4);
+		downscale(&full, opt_shift, &small);
+		memset(cache_key, 0xFF, 4096 * sizeof(int32_t));
+		uint8_t *d = buf_grow(out, sstride);
+		for (size_t i = 0; i < (size_t)sw * sh; i++) d[i] = (uint8_t)nearest_color(palette, small.px + 4 * i, cache_key, cache_val);
+		memcpy(d + (size_t)sw * sh, palette, 1024);
+		free(small.px);
+	}
+	free(full.px);
+	free(cache_key);
+	free(cache_val);
+	return 1;
+}
+
 /* ------------------------------------------------------------------- pkg */
 
 #define REC 158
@@ -844,11 +920,17 @@ static void store(Entry *e, Buf *b)
 static void convert_entry(Entry *e)
 {
 	if (e->skip) return;
-	int gi = has_ext(e, ".gi"), gai = has_ext(e, ".gai");
-	if (!gi && !gai) return;
+	int gi = has_ext(e, ".gi"), gai = has_ext(e, ".gai"), hai = has_ext(e, ".hai");
+	if (!gi && !gai && !hai) return;
 	uint8_t *raw = pkg_read(&pkg, e);
 	Buf out = {0};
-	if (gi) {
+	if (hai) {
+		count(&stats.hai_in);
+		if (convert_hai(raw, e->size, &out)) {
+			count(&stats.hai_done);
+			store(e, &out);
+		}
+	} else if (gi) {
 		pthread_mutex_lock(&stats_lock);
 		stats.gi_in++;
 		pthread_mutex_unlock(&stats_lock);
@@ -1019,8 +1101,10 @@ int main(int argc, char **argv)
 	for (int k = 0; k < jobs; k++) pthread_create(&t[k], NULL, worker, NULL);
 	for (int k = 0; k < jobs; k++) pthread_join(t[k], NULL);
 	write_pkg(argv[i + 1]);
-	printf("%s: images %ld/%ld, animations %ld/%ld, playback animations %ld/%ld, %.1f -> %.1f MiB\n",
+	printf("%s: images %ld/%ld, animations %ld/%ld, playback animations %ld/%ld, ship sprites %ld/%ld, "
+	       "%.1f -> %.1f MiB\n",
 	       argv[i], stats.gi_done, stats.gi_in, stats.gai_done, stats.gai_in, stats.pb_done, stats.pb_in,
+	       stats.hai_done, stats.hai_in,
 	       stats.bytes_in / 1048576.0, (stats.bytes_out + 4) / 1048576.0);
 	return 0;
 }

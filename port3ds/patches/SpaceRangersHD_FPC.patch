@@ -1,5 +1,5 @@
 diff --git a/platform/GameGraphics.pas b/platform/GameGraphics.pas
-index 1aca9ba..2d7ebf1 100644
+index 1aca9ba..783611f 100644
 --- a/platform/GameGraphics.pas
 +++ b/platform/GameGraphics.pas
 @@ -6,6 +6,25 @@ interface
@@ -37,7 +37,7 @@ index 1aca9ba..2d7ebf1 100644
  type
    TSDLStorage = class;
    ISDLImage = interface
-@@ -30,6 +49,14 @@ type
+@@ -30,6 +49,17 @@ type
      TextureFormat: Cardinal;
      Generation: LongInt;
      Dirty, Locked, ReadOnly, Screen, Target: Boolean;
@@ -48,11 +48,14 @@ index 1aca9ba..2d7ebf1 100644
 +    Shift, Rows: Integer;
 +    LockBuffer: Pointer;
 +    LockPitch: Integer;
++    // Set once the pixels had to be read back from the GPU: the texture is
++    // updated repeatedly (an animation buffer), so its CPU copy is kept.
++    KeepPixels: Boolean;
 +{$ENDIF}
      constructor Create(
          W, H: Integer;
          Format, Pool: Cardinal;
-@@ -43,6 +70,11 @@ type
+@@ -43,6 +73,11 @@ type
      procedure Upload;
      procedure Lock(out Data: TD3DLockedRect; Rect: PRect; Flags: Cardinal);
      procedure Unlock;
@@ -64,7 +67,7 @@ index 1aca9ba..2d7ebf1 100644
    end;
    TSDLTexture = class(TSDLResourceBase, IDirect3DTexture9, ISDLImage)
      Image: ISDLImage;
-@@ -253,7 +285,23 @@ begin
+@@ -253,7 +288,23 @@ begin
    else
      Bpp := 4;
    Pitch := (W * Bpp + 3) and not 3;
@@ -88,7 +91,7 @@ index 1aca9ba..2d7ebf1 100644
    Screen := IsScreen;
    Target := IsTarget;
    Dirty := not Target;
-@@ -264,6 +312,14 @@ begin
+@@ -264,6 +315,14 @@ begin
    // the renderer thread, even though their Pascal pixel storage can be freed here.
    if Handle <> nil then
      RetiredTextures.Add(Handle);
@@ -103,7 +106,7 @@ index 1aca9ba..2d7ebf1 100644
    FreeMem(Pixels);
    inherited Destroy;
  end;
-@@ -271,10 +327,98 @@ function TSDLStorage.Storage: TSDLStorage;
+@@ -271,10 +330,101 @@ function TSDLStorage.Storage: TSDLStorage;
  begin
    Result := Self
  end;
@@ -133,7 +136,10 @@ index 1aca9ba..2d7ebf1 100644
 +    InterLockedExchangeAdd(CtrTexturePixelBytes, Pitch * Rows);
 +    InterLockedIncrement(CtrTextureCount);
 +    if Handle <> nil then
++    begin
 +      Check(SDL_CTR_ReadTextureStored(Handle, PixelFormat(Desc.Format), Pixels, Pitch));
++      KeepPixels := True;
++    end;
 +  finally
 +    LeaveCriticalSection(PixelsLock);
 +  end;
@@ -143,7 +149,7 @@ index 1aca9ba..2d7ebf1 100644
 +begin
 +  EnterCriticalSection(PixelsLock);
 +  try
-+    if (Pixels = nil) or Target or Screen or Locked or Dirty or (Handle = nil) then
++    if (Pixels = nil) or Target or Screen or Locked or Dirty or (Handle = nil) or KeepPixels then
 +      Exit;
 +    // Small textures are locked often and cost little.
 +    if SizeUInt(Pitch) * Rows < 64 * 1024 then
@@ -202,18 +208,22 @@ index 1aca9ba..2d7ebf1 100644
  begin
    if Target then
      CurrentGeneration := GameTargetGeneration
-@@ -282,6 +426,10 @@ begin
+@@ -282,6 +432,14 @@ begin
      CurrentGeneration := GameTextureGeneration;
    if (Handle <> nil) and (Generation <> CurrentGeneration) then
    begin
 +{$IFDEF CTR}
-+    if not Target then
++    if not Target and (Pixels = nil) then
++    begin
++      // A readback for the new texture, not a sign of repeated updates.
 +      EnsurePixels;
++      KeepPixels := False;
++    end;
 +{$ENDIF}
      SDL_DestroyTexture(Handle);
      Handle := nil;
      // Ordinary textures have authoritative CPU pixels. Render targets do not:
-@@ -298,7 +446,17 @@ begin
+@@ -298,7 +456,17 @@ begin
    TextureFormat := PixelFormat(Desc.Format);
    if Target then
      TextureFormat := SDL_PIXELFORMAT_ARGB8888;
@@ -231,7 +241,7 @@ index 1aca9ba..2d7ebf1 100644
    Require(Handle <> nil, string(SDL_GetError));
    Generation := CurrentGeneration;
  end;
-@@ -311,6 +469,12 @@ begin
+@@ -311,6 +479,12 @@ begin
    Realize;
    if Dirty then
    begin
@@ -244,7 +254,7 @@ index 1aca9ba..2d7ebf1 100644
      if PixelFormat(Desc.Format) = TextureFormat then
        Check(SDL_UpdateTexture(Handle, nil, Pixels, Pitch))
      else
-@@ -331,6 +495,9 @@ begin
+@@ -331,6 +505,9 @@ begin
        Check(SDL_UpdateTexture(Handle, nil, @Converted[0], Desc.Width * 4));
      end;
      Dirty := False;
@@ -254,7 +264,7 @@ index 1aca9ba..2d7ebf1 100644
    end;
  end;
  
-@@ -369,12 +536,31 @@ begin
+@@ -369,12 +546,31 @@ begin
      X := Rect.Left;
      Y := Rect.Top;
    end;
@@ -286,7 +296,7 @@ index 1aca9ba..2d7ebf1 100644
    Data.Bits := PByte(Pixels) + Y * Pitch + X * Bpp;
    Data.Pitch := Pitch;
    Locked := True;
-@@ -383,6 +569,18 @@ end;
+@@ -383,6 +579,18 @@ end;
  procedure TSDLStorage.Unlock;
  begin
    Require(Locked, 'unlock without lock');
@@ -305,7 +315,7 @@ index 1aca9ba..2d7ebf1 100644
    if not ReadOnly then
      Dirty := True;
    Locked := False;
-@@ -609,7 +807,20 @@ end;
+@@ -609,7 +817,20 @@ end;
  
  function TSDLDevice.GetAvailableTextureMem: Cardinal;
  begin
@@ -326,7 +336,7 @@ index 1aca9ba..2d7ebf1 100644
  end; // Cache budget, not a physical VRAM query.
  function TSDLDevice.CreateTexture(
      Width, Height, Levels, Usage, Format, Pool: Cardinal;
-@@ -618,7 +829,21 @@ function TSDLDevice.CreateTexture(
+@@ -618,7 +839,21 @@ function TSDLDevice.CreateTexture(
  ): LongInt;
  begin
    Require((Levels <= 1) and (Usage = 0) and (SharedHandle = nil), 'texture options');
@@ -348,7 +358,7 @@ index 1aca9ba..2d7ebf1 100644
    Result := 0;
  end;
  function TSDLDevice.CreateRenderTarget(
-@@ -657,7 +882,15 @@ begin
+@@ -657,7 +892,15 @@ begin
            and (A.Desc.Format = B.Desc.Format),
        'texture copy dimensions'
    );
@@ -364,7 +374,7 @@ index 1aca9ba..2d7ebf1 100644
    B.Dirty := True;
    Result := 0;
  end;
-@@ -675,6 +908,9 @@ begin
+@@ -675,6 +918,9 @@ begin
            and (A.Desc.Height = B.Desc.Height),
        'readback dimensions'
    );
@@ -374,7 +384,7 @@ index 1aca9ba..2d7ebf1 100644
    A.ReadPixels(B.Pixels, B.Pitch, B.Desc.Format);
    B.Dirty := True;
    Result := 0;
-@@ -1288,7 +1524,35 @@ begin
+@@ -1288,7 +1534,35 @@ begin
    Result := TSDLGraphics.Create;
  end;
  
