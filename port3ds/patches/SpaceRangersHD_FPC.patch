@@ -1,8 +1,57 @@
+diff --git a/platform/GameGraphics.pas b/platform/GameGraphics.pas
+index 1aca9ba..243adfe 100644
+--- a/platform/GameGraphics.pas
++++ b/platform/GameGraphics.pas
+@@ -609,7 +609,12 @@ end;
+ 
+ function TSDLDevice.GetAvailableTextureMem: Cardinal;
+ begin
++{$IFDEF CTR}
++  // Textures live in the 3DS linear heap (about 26 MiB) and keep a CPU copy.
++  Result := 16 * 1024 * 1024
++{$ELSE}
+   Result := 512 * 1024 * 1024
++{$ENDIF}
+ end; // Cache budget, not a physical VRAM query.
+ function TSDLDevice.CreateTexture(
+     Width, Height, Levels, Usage, Format, Pool: Cardinal;
 diff --git a/platform/GameSystem.pas b/platform/GameSystem.pas
-index 93501b6..cd86399 100644
+index 93501b6..d61aa7d 100644
 --- a/platform/GameSystem.pas
 +++ b/platform/GameSystem.pas
-@@ -203,7 +203,7 @@ begin
+@@ -122,7 +122,15 @@ begin
+   end;
+ end;
+ 
++{$IFDEF CTR}
++procedure fpcctr_meminfo(Info: PLongWord); cdecl; external;
++{$ENDIF}
++
+ function QueryGameMemory(out Status: TGameMemoryStatus): Boolean;
++{$IFDEF CTR}
++var
++  Info: array[0..6] of LongWord;
++{$ENDIF}
+ {$IFNDEF MSWINDOWS}
+ var
+   Heap: TFPCHeapStatus;
+@@ -191,6 +199,15 @@ begin
+   Heap := GetFPCHeapStatus;
+   Status.TotalVirtual := QWord(High(PtrInt));
+   Status.AvailVirtual := Status.TotalVirtual - Min(Status.TotalVirtual, QWord(Heap.CurrHeapSize));
++{$IFDEF CTR}
++  // The 3DS has no virtual memory: report the heap libctru reserved for
++  // the program, so that the game sizes its caches to fit.
++  fpcctr_meminfo(@Info[0]);
++  Status.TotalPhys := Info[2];
++  Status.AvailPhys := Info[2] - Min(Info[2], Info[1]);
++  Status.TotalVirtual := Status.TotalPhys;
++  Status.AvailVirtual := Status.AvailPhys;
++{$ENDIF}
+   if Status.TotalPhys <> 0 then
+     Status.MemoryLoad := ((Status.TotalPhys - Status.AvailPhys) * 100) div Status.TotalPhys;
+   Result := Status.TotalPhys <> 0;
+@@ -203,7 +220,7 @@ begin
    Result := Cardinal(GetTickCount64);
  end;
  
@@ -11,7 +60,7 @@ index 93501b6..cd86399 100644
  function ResolveGamePathCase(const Path: UnicodeString): UnicodeString;
  var
    Directory, Name: UnicodeString;
-@@ -232,7 +232,7 @@ begin
+@@ -232,7 +249,7 @@ begin
        FindClose(Entry);
      end;
  end;
@@ -20,7 +69,7 @@ index 93501b6..cd86399 100644
  
  function NativeGamePath(const Path: UnicodeString): UnicodeString;
  var
-@@ -243,13 +243,17 @@ begin
+@@ -243,13 +260,17 @@ begin
    for Index := 1 to Length(Result) do
      if (Result[Index] = '\') or (Result[Index] = '/') then
        Result[Index] := DirectorySeparator;
@@ -40,7 +89,7 @@ index 93501b6..cd86399 100644
  {$IFDEF DARWIN}
    Result := GetUserDir + 'Library/Application Support/SpaceRangersHD/';
  {$ELSE}
-@@ -298,6 +302,10 @@ begin
+@@ -298,6 +319,10 @@ begin
    // ARM's timer frequency is not its CPU clock. Keep the game's 1500 MHz
    // fallback when the OS does not report a processor frequency.
    Result := 1500;
@@ -51,6 +100,22 @@ index 93501b6..cd86399 100644
  {$IFDEF DARWIN}
    Size := SizeOf(Frequency);
    if (FPsysctlbyname('hw.cpufrequency', @Frequency, @Size, nil, 0) = 0)
+diff --git a/source/GR_Main.pas b/source/GR_Main.pas
+index 6bbf02f..7fe7986 100644
+--- a/source/GR_Main.pas
++++ b/source/GR_Main.pas
+@@ -4990,6 +4990,11 @@ begin
+     else
+       GlobalCache.ResidentByteLimit :=
+           Min(Int64(Cardinal(MemoryStatus.AvailVirtual) div 3), Int64($18000000));
++{$IFDEF CTR}
++  // The whole program has about 85 MiB of heap on a New 3DS.
++  if GlobalCache.ResidentByteLimit > 16 * 1024 * 1024 then
++    GlobalCache.ResidentByteLimit := 16 * 1024 * 1024;
++{$ENDIF}
+   AppendLogLineThreadSafe('Cache Size=' + IntToStr(GlobalCache.ResidentByteLimit div 1024) + ' KB');
+   if UserSettingsConfig.CountParams('Brightness') > 0 then
+     DisplayBrightness :=
 diff --git a/source/Rangers.dpr b/source/Rangers.dpr
 index 1948f70..5ec0990 100644
 --- a/source/Rangers.dpr
