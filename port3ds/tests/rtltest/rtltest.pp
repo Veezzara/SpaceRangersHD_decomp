@@ -241,6 +241,48 @@ begin
   Check((r.X = 2) and (r.Y = 4) and (r.Z = 6), 'AAPCS-VFP: HFA return');
 end;
 
+{ More files open at once than the RTL keeps real descriptors for:
+  descriptors are recycled and reopened at the same position. }
+procedure TestManyOpenFiles;
+const
+  Dir = 'sdmc:/rtltest.many';
+  Count = 100;
+var
+  h: array[0..Count - 1] of THandle;
+  i, ok, v: Integer;
+  b: Byte;
+begin
+  ForceDirectories(Dir);
+  for i := 0 to Count - 1 do
+    begin
+      h[i] := FileCreate(Format('%s/f%d.bin', [Dir, i]));
+      for v := 0 to 9 do
+        begin
+          b := Byte(i + v);
+          FileWrite(h[i], b, 1);
+        end;
+    end;
+  ok := 0;
+  for i := 0 to Count - 1 do
+    if h[i] <> THandle(-1) then
+      begin
+        FileSeek(h[i], 3, fsFromBeginning);
+        if (FileRead(h[i], b, 1) = 1) and (b = Byte(i + 3)) then
+          Inc(ok);
+      end;
+  { interleaved reads continue from the remembered position }
+  for i := 0 to Count - 1 do
+    if (h[i] <> THandle(-1)) and (FileRead(h[i], b, 1) = 1) and (b = Byte(i + 4)) then
+      Inc(ok);
+  for i := 0 to Count - 1 do
+    begin
+      FileClose(h[i]);
+      DeleteFile(Format('%s/f%d.bin', [Dir, i]));
+    end;
+  RemoveDir(Dir);
+  Check(ok = 2 * Count, Format('%d files open at once (%d/%d reads ok)', [Count, ok, 2 * Count]));
+end;
+
 procedure TestFiles;
 const
   Dir = 'sdmc:/rtltest.tmp';
@@ -295,6 +337,7 @@ begin
   Check(RenameFile(Dir + '/beta.txt', Dir + '/gamma.txt'), 'RenameFile');
   Check(DeleteFile(Dir + '/gamma.txt') and DeleteFile(Dir + '/Alpha.TXT'), 'DeleteFile');
   Check(RemoveDir(Dir + '/sub') and RemoveDir(Dir), 'RemoveDir');
+  TestManyOpenFiles;
 end;
 
 procedure TestHeap;

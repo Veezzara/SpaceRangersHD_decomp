@@ -69,9 +69,106 @@ void fpcctr_set_errno(int e) { errno = e; }
 #define FPCCTR_O_APPEND 0x40
 #define FPCCTR_O_EXCL   0x80
 
+/* Virtual file descriptors.
+ *
+ * The 3DS limits how many files a process can keep open, while the game
+ * keeps every data package open for its whole run. Files opened through
+ * the RTL get virtual descriptors (VFD_BASE + index); at most MAX_REAL of
+ * them hold a real descriptor at a time. The least recently used one is
+ * closed when needed and transparently reopened at the same position. */
+#define VFD_BASE 1000
+#define MAX_VFD 1024
+#define MAX_REAL 24
+
+typedef struct {
+	char *path;
+	int flags;      /* newlib flags for reopening */
+	int mode;
+	int fd;         /* real descriptor or -1 */
+	off_t pos;      /* position while closed */
+	u32 last_use;
+} vfile;
+
+static vfile vfiles[MAX_VFD];
+static int real_open_count;
+static u32 use_clock;
+static LightLock vfile_lock = 1;
+static struct {
+	int opened, peak_open, peak_real, evictions, reopen_failures, failures, rdonly_fallbacks;
+	int last_errno;
+	char last_path[256];
+} fstats;
+
+static void note_failure(const char *path, int err)
+{
+	fstats.failures++;
+	fstats.last_errno = err;
+	strncpy(fstats.last_path, path, sizeof(fstats.last_path) - 1);
+}
+
+static int real_open(const char *path, int flags, int mode)
+{
+	int fd = open(path, flags, mode);
+	if (fd < 0 && (flags & O_ACCMODE) == O_RDWR &&
+	    (errno == EACCES || errno == EPERM || errno == EROFS)) {
+		/* read-only media or attribute: the game opens data read/write */
+		fd = open(path, (flags & ~O_ACCMODE) | O_RDONLY, mode);
+		if (fd >= 0) fstats.rdonly_fallbacks++;
+	}
+	return fd;
+}
+
+static int evict_one(void)
+{
+	int i, victim = -1;
+	u32 oldest = 0xFFFFFFFFu;
+	for (i = 0; i < MAX_VFD; i++)
+		if (vfiles[i].path && vfiles[i].fd >= 0 && vfiles[i].last_use < oldest) {
+			oldest = vfiles[i].last_use;
+			victim = i;
+		}
+	if (victim < 0) return 0;
+	vfiles[victim].pos = lseek(vfiles[victim].fd, 0, SEEK_CUR);
+	close(vfiles[victim].fd);
+	vfiles[victim].fd = -1;
+	real_open_count--;
+	fstats.evictions++;
+	return 1;
+}
+
+/* Returns the real descriptor of a virtual one, reopening it if needed;
+   -1 with errno set on failure. Called with vfile_lock held. */
+static int real_fd(int vfd)
+{
+	vfile *v;
+	int fd;
+	if (vfd < VFD_BASE) return vfd;
+	if (vfd >= VFD_BASE + MAX_VFD || !vfiles[vfd - VFD_BASE].path) {
+		errno = EBADF;
+		return -1;
+	}
+	v = &vfiles[vfd - VFD_BASE];
+	v->last_use = ++use_clock;
+	if (v->fd >= 0) return v->fd;
+	if (real_open_count >= MAX_REAL) evict_one();
+	fd = real_open(v->path, v->flags & ~(O_CREAT | O_TRUNC | O_EXCL), v->mode);
+	if (fd < 0 && (errno == EMFILE || errno == ENFILE) && evict_one())
+		fd = real_open(v->path, v->flags & ~(O_CREAT | O_TRUNC | O_EXCL), v->mode);
+	if (fd < 0) {
+		fstats.reopen_failures++;
+		note_failure(v->path, errno);
+		return -1;
+	}
+	if (!(v->flags & O_APPEND)) lseek(fd, v->pos, SEEK_SET);
+	v->fd = fd;
+	real_open_count++;
+	if (real_open_count > fstats.peak_real) fstats.peak_real = real_open_count;
+	return fd;
+}
+
 int fpcctr_open(const char *path, int flags, int mode)
 {
-	int f;
+	int f, fd, i, err;
 	switch (flags & 3) {
 	case 0: f = O_RDONLY; break;
 	case 1: f = O_WRONLY; break;
@@ -81,21 +178,123 @@ int fpcctr_open(const char *path, int flags, int mode)
 	if (flags & FPCCTR_O_TRUNC) f |= O_TRUNC;
 	if (flags & FPCCTR_O_APPEND) f |= O_APPEND;
 	if (flags & FPCCTR_O_EXCL) f |= O_EXCL;
-	return open(path, f, mode);
+	LightLock_Lock(&vfile_lock);
+	for (i = 0; i < MAX_VFD && vfiles[i].path; i++)
+		;
+	if (i == MAX_VFD) {
+		LightLock_Unlock(&vfile_lock);
+		note_failure(path, EMFILE);
+		errno = EMFILE;
+		return -1;
+	}
+	if (real_open_count >= MAX_REAL) evict_one();
+	fd = real_open(path, f, mode);
+	if (fd < 0 && (errno == EMFILE || errno == ENFILE) && evict_one())
+		fd = real_open(path, f, mode);
+	if (fd < 0) {
+		err = errno;
+		note_failure(path, err);
+		LightLock_Unlock(&vfile_lock);
+		errno = err;
+		return -1;
+	}
+	vfiles[i].path = strdup(path);
+	vfiles[i].flags = f;
+	vfiles[i].mode = mode;
+	vfiles[i].fd = fd;
+	vfiles[i].pos = 0;
+	vfiles[i].last_use = ++use_clock;
+	real_open_count++;
+	fstats.opened++;
+	if (real_open_count > fstats.peak_real) fstats.peak_real = real_open_count;
+	{
+		int n = 0, j;
+		for (j = 0; j < MAX_VFD; j++) if (vfiles[j].path) n++;
+		if (n > fstats.peak_open) fstats.peak_open = n;
+	}
+	LightLock_Unlock(&vfile_lock);
+	return VFD_BASE + i;
 }
 
-int fpcctr_close(int fd) { return close(fd); }
-int fpcctr_read(int fd, void *buf, int len) { return read(fd, buf, len); }
-int fpcctr_write(int fd, const void *buf, int len) { return write(fd, buf, len); }
-
-long long fpcctr_lseek(int fd, long long offset, int whence)
+int fpcctr_close(int vfd)
 {
-	off_t r = lseek(fd, (off_t)offset, whence);
+	vfile *v;
+	int r = 0;
+	if (vfd < VFD_BASE) return close(vfd);
+	LightLock_Lock(&vfile_lock);
+	if (vfd >= VFD_BASE + MAX_VFD || !vfiles[vfd - VFD_BASE].path) {
+		LightLock_Unlock(&vfile_lock);
+		errno = EBADF;
+		return -1;
+	}
+	v = &vfiles[vfd - VFD_BASE];
+	if (v->fd >= 0) {
+		r = close(v->fd);
+		real_open_count--;
+	}
+	free(v->path);
+	memset(v, 0, sizeof(*v));
+	LightLock_Unlock(&vfile_lock);
+	return r;
+}
+
+int fpcctr_read(int vfd, void *buf, int len)
+{
+	int fd, r;
+	LightLock_Lock(&vfile_lock);
+	fd = real_fd(vfd);
+	r = fd < 0 ? -1 : read(fd, buf, len);
+	LightLock_Unlock(&vfile_lock);
+	return r;
+}
+
+int fpcctr_write(int vfd, const void *buf, int len)
+{
+	int fd, r;
+	LightLock_Lock(&vfile_lock);
+	fd = real_fd(vfd);
+	r = fd < 0 ? -1 : write(fd, buf, len);
+	LightLock_Unlock(&vfile_lock);
+	return r;
+}
+
+long long fpcctr_lseek(int vfd, long long offset, int whence)
+{
+	int fd;
+	off_t r;
+	LightLock_Lock(&vfile_lock);
+	fd = real_fd(vfd);
+	r = fd < 0 ? -1 : lseek(fd, (off_t)offset, whence);
+	LightLock_Unlock(&vfile_lock);
 	return (long long)r;
 }
 
-int fpcctr_ftruncate(int fd, long long size) { return ftruncate(fd, (off_t)size); }
-int fpcctr_isatty(int fd) { return isatty(fd); }
+int fpcctr_ftruncate(int vfd, long long size)
+{
+	int fd, r;
+	LightLock_Lock(&vfile_lock);
+	fd = real_fd(vfd);
+	r = fd < 0 ? -1 : ftruncate(fd, (off_t)size);
+	LightLock_Unlock(&vfile_lock);
+	return r;
+}
+
+/* [0] files opened, [1] open now, [2] peak open, [3] real descriptors now,
+   [4] peak real, [5] evictions, [6] reopen failures, [7] open failures,
+   [8] read-only fallbacks, [9] errno of the last failure. */
+const char *fpcctr_file_stats(int *out)
+{
+	int i, n = 0;
+	LightLock_Lock(&vfile_lock);
+	for (i = 0; i < MAX_VFD; i++) if (vfiles[i].path) n++;
+	out[0] = fstats.opened; out[1] = n; out[2] = fstats.peak_open; out[3] = real_open_count;
+	out[4] = fstats.peak_real; out[5] = fstats.evictions; out[6] = fstats.reopen_failures;
+	out[7] = fstats.failures; out[8] = fstats.rdonly_fallbacks; out[9] = fstats.last_errno;
+	LightLock_Unlock(&vfile_lock);
+	return fstats.last_path;
+}
+
+int fpcctr_isatty(int fd) { return fd < VFD_BASE ? isatty(fd) : 0; }
 int fpcctr_unlink(const char *path) { return unlink(path); }
 int fpcctr_rename(const char *from, const char *to) { return rename(from, to); }
 int fpcctr_mkdir(const char *path) { return mkdir(path, 0777); }
@@ -134,11 +333,16 @@ int fpcctr_stat(const char *path, fpcctr_statinfo *info)
 	return 0;
 }
 
-int fpcctr_fstat(int fd, fpcctr_statinfo *info)
+int fpcctr_fstat(int vfd, fpcctr_statinfo *info)
 {
 	struct stat st;
+	int fd, r;
 	memset(info, 0, sizeof(*info));
-	if (fstat(fd, &st) != 0) return -1;
+	LightLock_Lock(&vfile_lock);
+	fd = real_fd(vfd);
+	r = fd < 0 ? -1 : fstat(fd, &st);
+	LightLock_Unlock(&vfile_lock);
+	if (r != 0) return -1;
 	fill_stat(&st, info);
 	return 0;
 }

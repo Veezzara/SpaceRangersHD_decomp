@@ -99,6 +99,20 @@ var
   StartTicks: QWord;
 
 procedure fpcctr_meminfo(Info: PLongWord); cdecl; external;
+function fpcctr_file_stats(Stats: PLongInt): PAnsiChar; cdecl; external;
+
+procedure CtrLogFiles(const Context: AnsiString);
+var
+  Stats: array[0..9] of LongInt;
+  LastPath: PAnsiChar;
+begin
+  LastPath := fpcctr_file_stats(@Stats[0]);
+  CtrLog(Format('%s files: opened %d, open %d (peak %d), real %d (peak %d), evictions %d, reopen failures %d, ' +
+    'open failures %d, read-only fallbacks %d',
+    [Context, Stats[0], Stats[1], Stats[2], Stats[3], Stats[4], Stats[5], Stats[6], Stats[7], Stats[8]]));
+  if Stats[7] > 0 then
+    CtrLog(Format('%s last failed open: errno %d, %s', [Context, Stats[9], AnsiString(LastPath)]));
+end;
 
 procedure CtrLogMemory(const Context: AnsiString);
 var
@@ -122,7 +136,10 @@ begin
     Sleep(100);
     Inc(Counter);
     if Counter mod 20 = 0 then
+    begin
       CtrLogMemory(Format('t=%ds', [(GetTickCount64 - StartTicks) div 1000]));
+      CtrLogFiles(Format('t=%ds', [(GetTickCount64 - StartTicks) div 1000]));
+    end;
   end;
   Result := 0;
 end;
@@ -207,6 +224,7 @@ procedure CtrShutdown;
 begin
   MonitorStop := True;
   CtrLogMemory('exit');
+  CtrLogFiles('exit');
   CtrLog(Format('shutdown: ExitCode=%d ErrorAddr=%p', [ExitCode, ErrorAddr]));
   {$I-}
   Flush(Output);
