@@ -142,9 +142,9 @@ emulator on a virtual display. The RTL self-test passes there.
       background, but slowly (each animation frame is decoded and uploaded
       on the fly) and close to the memory limit.
 - [x] Downscaled data sets (`tools/convert-data.sh`, `assets.txt`); with
-      the half-size set the game reaches the new game screen and the galaxy
-      generation in the emulator. Entries above 16 MiB (the .hai ship
-      sprites) are still skipped.
+      the half-size set the game gets through the new game screen and the
+      galaxy generation in the emulator, but the heap is then at 82 of 87
+      MiB (game data, not images) and entering space runs out of memory.
 - [ ] Measure speed and memory on a New 3DS
 - [ ] Interface legibility on the small screens (layout work)
 
