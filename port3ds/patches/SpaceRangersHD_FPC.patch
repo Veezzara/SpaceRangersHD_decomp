@@ -700,6 +700,29 @@ index 1ebd867..fb6c406 100644
      Memory := GameHeap.HeapAlloc(GameHeap.GetProcessHeap, GameHeap.HEAP_ZERO_MEMORY, ByteCount);
      if Memory <> nil then
        AppendLogLineThreadSafe('success')
+diff --git a/source/graphics/GI_GI.pas b/source/graphics/GI_GI.pas
+index 2669b27..74a56f7 100644
+--- a/source/graphics/GI_GI.pas
++++ b/source/graphics/GI_GI.pas
+@@ -482,6 +482,18 @@ begin
+             while TileIndex < Image.TileCount do
+             begin
+               TileOrigin := Image.GetTileOrigin(TileIndex);
++{$IFDEF CTR}
++              // Tiles are created when first drawn (TCGiEC.GetOrCreateTile):
++              // do not ask for those outside the area being redrawn.
++              if (X + TileOrigin.X >= ClipRect.Right)
++                  or (Y + TileOrigin.Y >= ClipRect.Bottom)
++                  or (X + TileOrigin.X + Image.GetTileSize(TileIndex).X <= ClipRect.Left)
++                  or (Y + TileOrigin.Y + Image.GetTileSize(TileIndex).Y <= ClipRect.Top) then
++              begin
++                Inc(TileIndex);
++                Continue;
++              end;
++{$ENDIF}
+               DrawTexture(
+                   Image.GetOrCreateSurface(TileIndex),
+                   X + TileOrigin.X,
 diff --git a/source/graphics/GR_DX.pas b/source/graphics/GR_DX.pas
 index be7a584..141e5de 100644
 --- a/source/graphics/GR_DX.pas
@@ -1220,20 +1243,27 @@ index 1c8fc26..c21afb4 100644
 +
  end.
 diff --git a/source/resources/EC_CacheGI.pas b/source/resources/EC_CacheGI.pas
-index 8fe4c8b..0ba97ab 100644
+index 8fe4c8b..f2c8421 100644
 --- a/source/resources/EC_CacheGI.pas
 +++ b/source/resources/EC_CacheGI.pas
-@@ -33,6 +33,9 @@ type
+@@ -33,6 +33,16 @@ type
      TileOrigins: array of TPoint;
      TileCount: Integer;
      procedure LoadFromConfigBuffer(SourceBuffer: TBufEC; const LoadOption: WideString); override;
 +{$IFDEF CTR}
 +    function IsOnScreen: Boolean; override;
++  public
++    // Tiles of an image above the GPU limit are created when first drawn
++    // and released when not drawn for a while (see GetOrCreateTile).
++    TileSizes: array of TPoint;
++    TileUseTicks: array of Cardinal;
++    function GetTileSize(TileIndex: Integer): TPoint;
++    function GetOrCreateTile(TileIndex: Integer): IDirect3DTexture9;
 +{$ENDIF}
      constructor Create;
      destructor Destroy; override;
      function GetTileOrigin(TileIndex: Integer): TPoint;
-@@ -45,11 +48,180 @@ function AcquireCachedGi(Control: TCacheControlEC): TCGiEC;
+@@ -45,11 +55,180 @@ function AcquireCachedGi(Control: TCacheControlEC): TCGiEC;
  implementation
  
  uses
@@ -1414,7 +1444,131 @@ index 8fe4c8b..0ba97ab 100644
  procedure TCGiControlEC.QueueLoadIfMissing(PendingLoads: TList);
  var
    Control: TCGiControlEC;
-@@ -198,6 +370,10 @@ begin
+@@ -107,6 +286,111 @@ begin
+   inherited Destroy;
+ end;
+ 
++{$IFDEF CTR}
++const
++  // Tile edge for images above the GPU limit: a 1024x768 view touches at
++  // most 3x3 tiles, 0.5-1 MiB each, instead of the whole 13 MiB panorama.
++  CtrTileSize = 512;
++  // A tile not drawn for this long is released when another one is created.
++  CtrTileIdleMs = 2000;
++
++function TCGiEC.GetTileSize(TileIndex: Integer): TPoint;
++begin
++  Result := TileSizes[TileIndex];
++end;
++
++// Lazily tiled counterpart of the tiled branch of GetOrCreateSurface. The
++// original creates every tile up front (and indexes rows by the row count,
++// harmless while there is a single row); on the 3DS only the tiles in view
++// can be afforded on the GPU.
++function TCGiEC.GetOrCreateTile(TileIndex: Integer): IDirect3DTexture9;
++var
++  ImageSize, Size: TPoint;
++  Columns, Rows, Column, Row, Index: Integer;
++  Locked: TD3DLockedRect;
++  Now: Cardinal;
++  Plane: PgiPlaneGR;
++const
++  PlaneModes: array[0..2] of TRleScaledMode = (rsmTrans, rsmTransAlpha, rsmAlpha);
++begin
++  Result := nil;
++  if not UsesTiledSurfaces then
++  begin
++    ImageSize := Image.GetContentSize;
++    Columns := (ImageSize.X + CtrTileSize - 1) div CtrTileSize;
++    Rows := (ImageSize.Y + CtrTileSize - 1) div CtrTileSize;
++    TileCount := Columns * Rows;
++    SetLength(TileOrigins, TileCount);
++    SetLength(TileSizes, TileCount);
++    SetLength(TileUseTicks, TileCount);
++    for Row := 0 to Rows - 1 do
++      for Column := 0 to Columns - 1 do
++      begin
++        Index := Row * Columns + Column;
++        TileOrigins[Index] := Classes.Point(Column * CtrTileSize, Row * CtrTileSize);
++        TileSizes[Index] := Classes.Point(
++            Min(CtrTileSize, ImageSize.X - Column * CtrTileSize),
++            Min(CtrTileSize, ImageSize.Y - Row * CtrTileSize));
++        TileUseTicks[Index] := 0;
++      end;
++    UsesTiledSurfaces := True;
++  end;
++  if (TileIndex < 0) or (TileIndex >= TileCount) then
++    Exit;
++  Now := GameTickCount;
++  TileUseTicks[TileIndex] := Now;
++  Result := SurfaceCache.GetSurface(TileIndex);
++  if Result <> nil then
++    Exit;
++  for Index := 0 to TileCount - 1 do
++    if (Index <> TileIndex) and (Now - TileUseTicks[Index] > CtrTileIdleMs)
++        and (SurfaceCache.GetSurface(Index) <> nil) then
++      SurfaceCache.SetSurface(nil, Index);
++  Size := TileSizes[TileIndex];
++  if (Image.Header.Format = 0) and (Image.Header.AlphaMask = 0) then
++    Result := GR_CreateTexture(Size.X, Size.Y, D3DFMT_R5G6B5, D3DPOOL_MANAGED)
++  else
++    Result := GR_CreateTexture(Size.X, Size.Y, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED);
++  if Result = nil then
++    Exit;
++  Result.LockRect(0, Locked, nil, 0);
++  if Locked.Bits <> nil then
++  begin
++    if Image.Header.Format = 2 then
++    begin
++      for Index := 2 downto 0 do
++      begin
++        Plane := Image.GetPlane(Index);
++        if Plane.DataOffset <> 0 then
++          DrawRlePlaneScaled(
++              Locked.Bits,
++              Locked.Pitch,
++              0,
++              Plane.Bounds.Left - Image.Header.Bounds.Left - TileOrigins[TileIndex].X,
++              Plane.Bounds.Top - Image.Header.Bounds.Top - TileOrigins[TileIndex].Y,
++              Size.X,
++              Size.Y,
++              PByte(Image.Data) + Plane.DataOffset,
++              PlaneModes[Index]
++          );
++      end;
++    end
++    else
++      Image.DecodeRawRegion(
++          Locked.Bits,
++          Locked.Pitch,
++          TileOrigins[TileIndex].X,
++          TileOrigins[TileIndex].Y,
++          Size.X,
++          Size.Y,
++          True
++      );
++    Result.UnlockRect(0);
++  end;
++  SurfaceCache.SetSurface(Result, TileIndex);
++end;
++{$ENDIF}
++
+ function TCGiEC.GetTileOrigin(TileIndex: Integer): TPoint;
+ begin
+   Result := TileOrigins[TileIndex];
+@@ -127,6 +411,11 @@ var
+ begin
+   if SurfaceCache = nil then
+     SurfaceCache := CreateTextureCache;
++{$IFDEF CTR}
++  if UsesTiledSurfaces or ((Image <> nil) and ((Image.GetContentSize.X > MaxTextureSize.X)
++      or (Image.GetContentSize.Y > MaxTextureSize.Y))) then
++    Exit(GetOrCreateTile(SurfaceIndex));
++{$ENDIF}
+   Texture := SurfaceCache.GetSurface(SurfaceIndex);
+   if (Texture = nil) and (Image <> nil) and not UsesTiledSurfaces then
+   begin
+@@ -198,6 +487,10 @@ begin
          Texture := GR_CreateTexture(ImageSize.X, ImageSize.Y, D3DFMT_R5G6B5, D3DPOOL_MANAGED)
        else
          Texture := GR_CreateTexture(ImageSize.X, ImageSize.Y, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED);
@@ -1425,7 +1579,7 @@ index 8fe4c8b..0ba97ab 100644
        if Texture <> nil then
        begin
          Texture.LockRect(0, Locked, nil, 0);
-@@ -216,7 +392,11 @@ end;
+@@ -216,7 +509,11 @@ end;
  procedure TCGiEC.LoadFromConfigBuffer(SourceBuffer: TBufEC; const LoadOption: WideString);
  begin
    ApplyWideScreenLayoutFixups(SourceBuffer, CacheKey);
@@ -1437,7 +1591,7 @@ index 8fe4c8b..0ba97ab 100644
    ResidentBytes := Image.DataSize;
  end;
  
-@@ -851,4 +1031,12 @@ begin
+@@ -851,4 +1148,12 @@ begin
    end;
  end;
  

@@ -110,8 +110,8 @@ emulator on a virtual display. The RTL self-test passes there.
       the emulator (Azahar, New 3DS mode) after about 2.5 minutes
 - [x] Large animations (.gai above 1 MiB, up to 62 MiB in the HD version)
       are read frame by frame, keeping only the frame shown on the GPU;
-      images above the 1024-pixel GPU limit are decoded straight to their
-      downscaled size. The main menu runs with its ship animations and
+      images above the 1024-pixel GPU limit (the 4200x1600 menu panorama)
+      are drawn from 512-pixel tiles created when they come into view. The main menu runs with its ship animations and
       background, but slowly (each animation frame is decoded and uploaded
       on the fly) and close to the memory limit.
 - [ ] Converted resources (HD images and animations at half size), which
@@ -129,6 +129,7 @@ what was used in the last 8 seconds even above its 8 MiB budget, and the
 package layer remembers block offsets so that frames can be read from the
 middle of a compressed entry. Creating `trace_open.txt` next to the game
 data logs every file open and every heap block of 1 MiB or more to
-`open.log`.
+`open.log`; `frame_dump.txt` makes sdlctr save every 20th game frame, at
+the full 1024x768, as `frameNNN.bmp`.
 
 Game data is not included; it comes from an installed copy of the game.

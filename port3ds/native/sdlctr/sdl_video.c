@@ -14,8 +14,10 @@
  * t = y / th and rendered with the projection below.
  */
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <citro3d.h>
 #include "sdlctr.h"
 #include "render_shbin.h"
@@ -440,8 +442,8 @@ static void fill_info(SDL_RendererInfo *info)
 	info->texture_formats[0] = SDL_PIXELFORMAT_ARGB8888;
 	info->texture_formats[1] = SDL_PIXELFORMAT_XRGB8888;
 	info->texture_formats[2] = SDL_PIXELFORMAT_RGB565;
-	info->max_texture_width = 8192; /* larger than the GPU limit: downscaled */
-	info->max_texture_height = 8192;
+	info->max_texture_width = 1024; /* the PICA200 limit */
+	info->max_texture_height = 1024;
 }
 
 int SDL_GetNumRenderDrivers(void) { return 1; }
@@ -1091,6 +1093,42 @@ static void draw_cursor(float ox, float oy, float scale)
 	batch_start = vcount;
 }
 
+/* Debug aid: while frame_dump.txt exists next to the game data, every 20th
+   presented game frame is written to frameNNN.bmp (the full logical frame,
+   before it is scaled to the 3DS screens). */
+static void dump_frame(SDL_Texture *t)
+{
+	static unsigned count;
+	struct stat st;
+	FILE *f;
+	int x, y, w, h;
+	char name[64];
+	if (!t || ++count % 20 != 0) return;
+	if (stat("sdmc:/3ds/SpaceRangersHD/frame_dump.txt", &st) != 0) return;
+	snprintf(name, sizeof(name), "sdmc:/3ds/SpaceRangersHD/frame%03u.bmp", count / 20 % 1000);
+	f = fopen(name, "wb");
+	if (!f) return;
+	w = window_source_rect.w; h = window_source_rect.h;
+	gpu_sync();
+	GSPGPU_InvalidateDataCache(t->tex.data, t->tex.size);
+	{
+		uint32_t row = (uint32_t)w * 3, pad = (4 - row % 4) % 4, size = (row + pad) * h;
+		uint8_t hdr[54] = { 'B', 'M' };
+		uint32_t v[] = { 54 + size, 0, 54, 40, (uint32_t)w, (uint32_t)h, 1 | (24 << 16), 0, size, 2835, 2835, 0, 0 };
+		memcpy(hdr + 2, v, sizeof(v));
+		fwrite(hdr, 1, 54, f);
+		for (y = h - 1; y >= 0; y--) {
+			for (x = 0; x < w; x++) {
+				u32 c = texel_argb(t, window_source_rect.x + x, window_source_rect.y + y);
+				uint8_t px[3] = { (uint8_t)c, (uint8_t)(c >> 8), (uint8_t)(c >> 16) };
+				fwrite(px, 1, 3, f);
+			}
+			fwrite("\0\0\0", 1, pad, f);
+		}
+	}
+	fclose(f);
+}
+
 void SDL_RenderPresent(SDL_Renderer *r)
 {
 	sdlctr_view *vs = &sdlctr_view_state;
@@ -1104,6 +1142,7 @@ void SDL_RenderPresent(SDL_Renderer *r)
 	flush_batch();
 	if (vcount + 64 > VBUF_VERTICES) gpu_sync();
 	t = window_source;
+	dump_frame(t);
 	gw = (float)(t ? window_source_rect.w : vs->logical_w);
 	gh = (float)(t ? window_source_rect.h : vs->logical_h);
 
