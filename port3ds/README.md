@@ -108,18 +108,27 @@ emulator on a virtual display. The RTL self-test passes there.
       self-test passes in the emulator
 - [x] Linked `Rangers.3dsx`; with the game data it reaches the main menu in
       the emulator (Azahar, New 3DS mode) after about 2.5 minutes
-- [ ] Converted resources: the HD animations are read whole and do not fit
-      the ~87 MiB heap. Entries above 16 MiB (the main menu ships, 47-62 MiB
-      each) are skipped for now, and the 2048x1536 menu background barely
-      fits.
+- [x] Large animations (.gai above 1 MiB, up to 62 MiB in the HD version)
+      are read frame by frame, keeping only the frame shown on the GPU;
+      images above the 1024-pixel GPU limit are decoded straight to their
+      downscaled size. The main menu runs with its ship animations and
+      background, but slowly (each animation frame is decoded and uploaded
+      on the fly) and close to the memory limit.
+- [ ] Converted resources (HD images and animations at half size), which
+      the memory budget needs beyond the main menu. Other entries above
+      16 MiB (the .hai ship sprites) are still skipped.
 - [ ] Measure speed and memory on a New 3DS
+- [ ] Interface legibility on the small screens (layout work)
 
 Memory notes: the platform layer reports the real free memory as the
 texture budget, drops the CPU copy of a texture after uploading it (the GPU
-copy is read back if the game locks it again), lets the Pascal heap spill
-into spare linear memory, and caps worker thread stacks at 1 MiB. Creating
-`trace_open.txt` next to the game data logs every file open and every heap
-block of 1 MiB or more to `open.log`.
-- [ ] Interface legibility on the small screens (layout work)
+copy is read back if the game locks it again), keeps textures above the GPU
+limit at their downscaled size, lets the Pascal heap spill into spare linear
+memory, and caps worker thread stacks at 1 MiB. The resource cache keeps
+what was used in the last 8 seconds even above its 8 MiB budget, and the
+package layer remembers block offsets so that frames can be read from the
+middle of a compressed entry. Creating `trace_open.txt` next to the game
+data logs every file open and every heap block of 1 MiB or more to
+`open.log`.
 
 Game data is not included; it comes from an installed copy of the game.

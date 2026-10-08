@@ -440,8 +440,8 @@ static void fill_info(SDL_RendererInfo *info)
 	info->texture_formats[0] = SDL_PIXELFORMAT_ARGB8888;
 	info->texture_formats[1] = SDL_PIXELFORMAT_XRGB8888;
 	info->texture_formats[2] = SDL_PIXELFORMAT_RGB565;
-	info->max_texture_width = 4096; /* larger textures are downscaled */
-	info->max_texture_height = 4096;
+	info->max_texture_width = 8192; /* larger than the GPU limit: downscaled */
+	info->max_texture_height = 8192;
 }
 
 int SDL_GetNumRenderDrivers(void) { return 1; }
@@ -587,10 +587,12 @@ int SDL_SetTextureScaleMode(SDL_Texture *t, int mode)
 	return 0;
 }
 
-/* Converts one source row to the texture's PICA format and tiles it. */
-static void upload_rows(SDL_Texture *t, const uint8_t *pixels, int pitch, uint32_t src_format)
+/* Converts the source to the texture's PICA format and tiles it. step is
+   the number of source pixels per stored texel: 1 << shift for a full-size
+   source, 1 for a source already at the stored size. */
+static void upload_rows(SDL_Texture *t, const uint8_t *pixels, int pitch, uint32_t src_format, int step)
 {
-	int x, y, step = 1 << t->shift;
+	int x, y;
 	if (t->tex.fmt == GPU_RGB565) {
 		u16 *dst = (u16 *)t->tex.data;
 		for (y = 0; y < t->sh; y++) {
@@ -632,7 +634,20 @@ int SDL_UpdateTexture(SDL_Texture *t, const SDL_Rect *rect, const void *pixels, 
 		return sdlctr_set_error("updating a render target is not supported");
 	}
 	if (in_frame && t->used_frame == frame_id) gpu_sync();
-	upload_rows(t, pixels, pitch, t->format);
+	upload_rows(t, pixels, pitch, t->format, 1 << t->shift);
+	C3D_TexFlush(&t->tex);
+	return 0;
+}
+
+/* Port extension: update a texture from pixels already at its stored
+   (downscaled) size, (w + (1 << shift) - 1) >> shift wide, so that the
+   caller does not need a full-size copy of a texture above 1024 pixels. */
+int SDL_CTR_UpdateTextureStored(SDL_Texture *t, const void *pixels, int pitch)
+{
+	if (!t) return sdlctr_set_error("invalid texture");
+	if (t->target) return sdlctr_set_error("updating a render target is not supported");
+	if (in_frame && t->used_frame == frame_id) gpu_sync();
+	upload_rows(t, pixels, pitch, t->format, 1);
 	C3D_TexFlush(&t->tex);
 	return 0;
 }
@@ -820,17 +835,16 @@ static inline u32 texel_argb(const SDL_Texture *t, u32 x, u32 y)
 /* Port extension: read a static texture back at its SDL size. The texture
    lives in linear memory, so this lets the game drop its CPU-side copy after
    uploading; a downscaled texture comes back upscaled (nearest). */
-int SDL_CTR_ReadTexture(SDL_Texture *t, uint32_t format, void *pixels, int pitch)
+static int read_texture(SDL_Texture *t, uint32_t format, void *pixels, int pitch, int shift)
 {
-	int x, y;
-	if (!t) return sdlctr_set_error("invalid texture");
+	int x, y, w = shift ? t->w : t->sw, h = shift ? t->h : t->sh;
 	if (t->target) return sdlctr_set_error("use SDL_RenderReadPixels for render targets");
-	for (y = 0; y < t->h; y++) {
+	for (y = 0; y < h; y++) {
 		uint8_t *row = (uint8_t *)pixels + (size_t)y * pitch;
-		u32 sy = (u32)y >> t->shift;
+		u32 sy = (u32)y >> shift;
 		if (sy >= (u32)t->sh) sy = t->sh - 1;
-		for (x = 0; x < t->w; x++) {
-			u32 sx = (u32)x >> t->shift;
+		for (x = 0; x < w; x++) {
+			u32 sx = (u32)x >> shift;
 			u32 argb;
 			if (sx >= (u32)t->sw) sx = t->sw - 1;
 			argb = texel_argb(t, sx, sy);
@@ -843,6 +857,17 @@ int SDL_CTR_ReadTexture(SDL_Texture *t, uint32_t format, void *pixels, int pitch
 		}
 	}
 	return 0;
+}
+
+int SDL_CTR_ReadTexture(SDL_Texture *t, uint32_t format, void *pixels, int pitch)
+{
+	return t ? read_texture(t, format, pixels, pitch, t->shift) : sdlctr_set_error("invalid texture");
+}
+
+/* Reads a static texture at its stored size (see SDL_CTR_UpdateTextureStored). */
+int SDL_CTR_ReadTextureStored(SDL_Texture *t, uint32_t format, void *pixels, int pitch)
+{
+	return t ? read_texture(t, format, pixels, pitch, 0) : sdlctr_set_error("invalid texture");
 }
 
 int SDL_RenderReadPixels(SDL_Renderer *r, const SDL_Rect *rect, uint32_t format, void *pixels, int pitch)
