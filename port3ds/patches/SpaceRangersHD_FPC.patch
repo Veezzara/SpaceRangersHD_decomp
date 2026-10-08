@@ -1,5 +1,5 @@
 diff --git a/platform/GameSystem.pas b/platform/GameSystem.pas
-index 93501b6..057c580 100644
+index 93501b6..cd86399 100644
 --- a/platform/GameSystem.pas
 +++ b/platform/GameSystem.pas
 @@ -203,7 +203,7 @@ begin
@@ -40,6 +40,17 @@ index 93501b6..057c580 100644
  {$IFDEF DARWIN}
    Result := GetUserDir + 'Library/Application Support/SpaceRangersHD/';
  {$ELSE}
+@@ -298,6 +302,10 @@ begin
+   // ARM's timer frequency is not its CPU clock. Keep the game's 1500 MHz
+   // fallback when the OS does not report a processor frequency.
+   Result := 1500;
++{$IFDEF CTR}
++  // ARM11 MPCore of the New 3DS in its fast mode.
++  Result := 804;
++{$ENDIF}
+ {$IFDEF DARWIN}
+   Size := SizeOf(Frequency);
+   if (FPsysctlbyname('hw.cpufrequency', @Frequency, @Size, nil, 0) = 0)
 diff --git a/source/Rangers.dpr b/source/Rangers.dpr
 index 1948f70..5ec0990 100644
 --- a/source/Rangers.dpr
@@ -64,3 +75,18 @@ index 1948f70..5ec0990 100644
  {$IFDEF MSWINDOWS}
    Windows,
  {$ENDIF}
+diff --git a/source/resources/EC_HsFile.pas b/source/resources/EC_HsFile.pas
+index 7cde8eb..b064250 100644
+--- a/source/resources/EC_HsFile.pas
++++ b/source/resources/EC_HsFile.pas
+@@ -256,6 +256,10 @@ begin
+ {$IFDEF UNIX}
+   Result := fpClose(Handle) = 0;
+ {$ENDIF}
++{$IFDEF CTR}
++  FileClose(Handle);
++  Result := True;
++{$ENDIF}
+ end;
+ 
+ function OffsetPackPointer(Data: Pointer; ByteOffset: Cardinal): Pointer;
