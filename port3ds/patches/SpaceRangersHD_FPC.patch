@@ -1808,7 +1808,7 @@ index 1c8fc26..3fd0fc9 100644
 +
  end.
 diff --git a/source/resources/EC_CacheGI.pas b/source/resources/EC_CacheGI.pas
-index 8fe4c8b..cbc5013 100644
+index 8fe4c8b..b262c2b 100644
 --- a/source/resources/EC_CacheGI.pas
 +++ b/source/resources/EC_CacheGI.pas
 @@ -33,6 +33,16 @@ type
@@ -2171,7 +2171,21 @@ index 8fe4c8b..cbc5013 100644
    Texture := SurfaceCache.GetSurface(SurfaceIndex);
    if (Texture = nil) and (Image <> nil) and not UsesTiledSurfaces then
    begin
-@@ -194,10 +521,16 @@ begin
+@@ -136,7 +463,13 @@ begin
+       Result := nil;
+       Exit;
+     end;
++{$IFDEF CTR}
++    // Images above the GPU limit were sent to GetOrCreateTile above; a
++    // downscaled image may be larger, but its texture is not.
++    if False then
++{$ELSE}
+     if (MaxTextureSize.X < ImageSize.X) or (MaxTextureSize.Y < ImageSize.Y) then
++{$ENDIF}
+     begin
+       UsesTiledSurfaces := True;
+       Columns := GiTileDivideRoundUp(ImageSize.X, MaxTextureSize.X);
+@@ -194,10 +527,16 @@ begin
      end
      else
      begin
@@ -2188,7 +2202,7 @@ index 8fe4c8b..cbc5013 100644
        if Texture <> nil then
        begin
          Texture.LockRect(0, Locked, nil, 0);
-@@ -216,7 +549,11 @@ end;
+@@ -216,7 +555,11 @@ end;
  procedure TCGiEC.LoadFromConfigBuffer(SourceBuffer: TBufEC; const LoadOption: WideString);
  begin
    ApplyWideScreenLayoutFixups(SourceBuffer, CacheKey);
@@ -2200,7 +2214,7 @@ index 8fe4c8b..cbc5013 100644
    ResidentBytes := Image.DataSize;
  end;
  
-@@ -230,13 +567,30 @@ var
+@@ -230,13 +573,30 @@ var
    HeaderBytes: Pointer;
    Delta, Remainder, ExtraHeight: Integer;
    PreserveAlpha: Boolean;
@@ -2233,7 +2247,7 @@ index 8fe4c8b..cbc5013 100644
      WorkingImage.ClearData;
      WorkingImage.Free;
    end;
-@@ -285,6 +639,10 @@ begin
+@@ -285,6 +645,10 @@ begin
    if ExtraHeight < 0 then
      ExtraHeight := 0;
    Quiet := False;
@@ -2244,7 +2258,7 @@ index 8fe4c8b..cbc5013 100644
    if (ExtraScreenWidth > 0) and (ResourceKey = 'Bm.PanelMain2.' + GiResourceSuffix + 'BG') then
    begin
      LogWideScreenGiRescaleStart;
-@@ -768,6 +1126,9 @@ begin
+@@ -768,6 +1132,9 @@ begin
    begin
      LogWideScreenGiRescaleStart;
      SourceGraph := TGraphBufGR.Create(False);
@@ -2254,7 +2268,7 @@ index 8fe4c8b..cbc5013 100644
      RenderGiBufferToGraphBuf(SourceBuffer, SourceGraph);
      SourceGraph.RescaleRgbaLinear(GameScreenWidth, GameScreenHeight, True, 1, 1);
      StoreGraphBufAsGiBuffer(SourceBuffer, SourceGraph, Classes.Point(0, 0));
-@@ -834,10 +1195,18 @@ begin
+@@ -834,10 +1201,18 @@ begin
      until True;
      LogWideScreenGiRescaleStart;
      SourceGraph := TGraphBufGR.Create(False);
@@ -2273,7 +2287,7 @@ index 8fe4c8b..cbc5013 100644
      if (Delta <> SourceGraph.Width) or (Remainder <> SourceGraph.Height) then
      begin
        if PreserveAlpha then
-@@ -851,4 +1220,12 @@ begin
+@@ -851,4 +1226,12 @@ begin
    end;
  end;
  
